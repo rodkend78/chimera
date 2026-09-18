@@ -1,0 +1,9 @@
+Chimera
+Copyright 2026 Rod Kendrick
+
+The original Chimera source in this repository is licensed under the Apache
+License, Version 2.0. See LICENSE.
+
+This notice does not relicense third-party dependencies. Their licenses and
+required attributions are listed in THIRD_PARTY_NOTICES.md. The source beta
+does not vendor node_modules or a generated application bundle.

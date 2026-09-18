@@ -1,0 +1,257 @@
+{
+  "schema": "chimera.dsh-side-effects.v1",
+  "upstreamCommit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e",
+  "catalog": [
+    "ask_user_question",
+    "bash",
+    "cordis_define",
+    "cordis_inspect_list",
+    "cordis_inspect_query",
+    "cordis_inspect_self",
+    "cordis_run",
+    "cordis_stop",
+    "cordis_undefine",
+    "create_goal",
+    "edit",
+    "exit_plan_mode",
+    "followup_task",
+    "get_goal",
+    "glob",
+    "grep",
+    "interrupt_agent",
+    "job_kill",
+    "job_list",
+    "job_output",
+    "list_agents",
+    "lsp",
+    "pwsh",
+    "ralph",
+    "read",
+    "read_image",
+    "report",
+    "run_code",
+    "schedule_create",
+    "schedule_delete",
+    "schedule_list",
+    "send_message",
+    "session_event_read",
+    "session_event_search",
+    "session_event_trace",
+    "session_search",
+    "session_trace",
+    "skill",
+    "spawn_teammate",
+    "str_replace_editor",
+    "subagent",
+    "team_task_create",
+    "team_task_get",
+    "team_task_list",
+    "team_task_update",
+    "terminal_close",
+    "terminal_list",
+    "terminal_open",
+    "terminal_read",
+    "terminal_send",
+    "terminal_signal",
+    "todo_write",
+    "update_goal",
+    "wait_agent",
+    "web_fetch",
+    "web_search",
+    "workflow",
+    "write"
+  ],
+  "routes": [
+    {
+      "id": "human-interaction",
+      "capability": "human.interact",
+      "tools": ["ask_user_question"]
+    },
+    {
+      "id": "process-execution",
+      "capability": "process.execute",
+      "tools": ["bash", "lsp", "pwsh", "terminal_close", "terminal_open", "terminal_send", "terminal_signal"]
+    },
+    {
+      "id": "process-observation",
+      "capability": "process.read",
+      "tools": ["terminal_list", "terminal_read"]
+    },
+    {
+      "id": "runtime-modification",
+      "capability": "runtime.modify",
+      "tools": ["cordis_define", "cordis_run", "cordis_stop", "cordis_undefine"]
+    },
+    {
+      "id": "runtime-observation",
+      "capability": "runtime.read",
+      "tools": ["cordis_inspect_list", "cordis_inspect_query", "cordis_inspect_self"]
+    },
+    {
+      "id": "filesystem-read",
+      "capability": "filesystem.read",
+      "tools": ["glob", "grep", "read", "read_image"]
+    },
+    {
+      "id": "filesystem-write",
+      "capability": "filesystem.write",
+      "tools": ["edit", "str_replace_editor", "write"]
+    },
+    {
+      "id": "agent-message",
+      "capability": "agent.message",
+      "tools": ["followup_task", "report", "send_message"]
+    },
+    {
+      "id": "agent-control",
+      "capability": "agent.control",
+      "tools": ["interrupt_agent"]
+    },
+    {
+      "id": "agent-read",
+      "capability": "agent.read",
+      "tools": ["list_agents", "wait_agent"]
+    },
+    {
+      "id": "agent-spawn",
+      "capability": "agent.spawn",
+      "tools": ["spawn_teammate", "subagent"]
+    },
+    {
+      "id": "job-control",
+      "capability": "job.control",
+      "tools": ["job_kill"]
+    },
+    {
+      "id": "job-read",
+      "capability": "job.read",
+      "tools": ["job_list", "job_output"]
+    },
+    {
+      "id": "workflow-execution",
+      "capability": "workflow.execute",
+      "tools": ["ralph", "workflow"]
+    },
+    {
+      "id": "code-mode-transport",
+      "capability": "code.execute",
+      "tools": ["run_code"]
+    },
+    {
+      "id": "schedule-write",
+      "capability": "schedule.write",
+      "tools": ["schedule_create", "schedule_delete"]
+    },
+    {
+      "id": "schedule-read",
+      "capability": "schedule.read",
+      "tools": ["schedule_list"]
+    },
+    {
+      "id": "session-write",
+      "capability": "session.write",
+      "tools": ["create_goal", "exit_plan_mode", "update_goal"]
+    },
+    {
+      "id": "session-read",
+      "capability": "session.read",
+      "tools": ["get_goal", "session_event_read", "session_event_search", "session_event_trace", "session_search", "session_trace"]
+    },
+    {
+      "id": "skill-read",
+      "capability": "skill.read",
+      "tools": ["skill"]
+    },
+    {
+      "id": "task-write",
+      "capability": "task.write",
+      "tools": ["team_task_create", "team_task_update", "todo_write"]
+    },
+    {
+      "id": "task-read",
+      "capability": "task.read",
+      "tools": ["team_task_get", "team_task_list"]
+    },
+    {
+      "id": "network-request",
+      "capability": "network.request",
+      "tools": ["web_fetch", "web_search"]
+    },
+    {
+      "id": "chimera-github-pr-read",
+      "capability": "github.pr.read",
+      "tools": ["mcp__chimera_github__pr_checks"]
+    },
+    {
+      "id": "chimera-github-pr-write",
+      "capability": "github.pr.write",
+      "tools": [
+        "mcp__chimera_github__pr_create",
+        "mcp__chimera_github__pr_update",
+        "mcp__chimera_github__pr_comment"
+      ]
+    },
+    {
+      "id": "chimera-github-pr-merge",
+      "capability": "github.pr.merge",
+      "tools": ["mcp__chimera_github__pr_merge"]
+    },
+    {
+      "id": "chimera-account-read",
+      "capability": "browser.account.read",
+      "tools": ["mcp__chimera_account__read"]
+    },
+    {
+      "id": "chimera-account-wait",
+      "capability": "browser.account.wait",
+      "tools": ["mcp__chimera_account__await_share"]
+    },
+    {
+      "id": "chimera-rj-aws-read",
+      "capability": "aws.read",
+      "tools": ["mcp__chimera_rj_aws__identity", "mcp__chimera_rj_aws__instance_status"]
+    },
+    {
+      "id": "mcp-dynamic-tool",
+      "capability": "mcp.invoke",
+      "namePattern": "^mcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_-]+$"
+    }
+  ],
+  "nonToolPaths": [
+    {
+      "id": "credential-broker",
+      "owner": "credential provider plus AWS IAM and Secrets Manager",
+      "control": "credentials remain outside agent workspaces and are injected only into an already-authorized provider"
+    },
+    {
+      "id": "filesystem-provider",
+      "owner": "filesystem provider and workspace mount policy",
+      "control": "path and write-intent enforcement below the tool pipeline"
+    },
+    {
+      "id": "human-command",
+      "owner": "authenticated human surface",
+      "control": "commands never inherit agent authority and consequential handlers still submit signed Chimera actions"
+    },
+    {
+      "id": "llm-provider",
+      "owner": "Chimera gateway model router",
+      "control": "signed model.invoke authorization and durable ambiguous-outcome handling"
+    },
+    {
+      "id": "mcp-provider",
+      "owner": "MCP client provider and egress policy",
+      "control": "dynamic MCP tools re-enter tools/pre-execute and server destinations require explicit egress"
+    },
+    {
+      "id": "network-egress",
+      "owner": "execution-plane network policy",
+      "control": "default-deny egress independently prevents semantic policy bypass"
+    },
+    {
+      "id": "subprocess-provider",
+      "owner": "subprocess provider, sandbox, and per-agent execution identity",
+      "control": "process, mount, environment, and signal restrictions apply below shell and terminal tools"
+    }
+  ]
+}

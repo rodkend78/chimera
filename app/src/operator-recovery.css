@@ -1,0 +1,54 @@
+.loading-screen.operator-recovery {
+  height: 100dvh;
+  min-height: 0;
+  overflow-y: auto;
+  align-content: safe center;
+  padding: 40px 20px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.operator-recovery > p { color: var(--muted); }
+.operator-recovery-card {
+  width: min(100%, 560px);
+  margin-top: 10px;
+  padding: clamp(20px, 4vw, 32px);
+  border: 1px solid var(--line, #d9e2eb);
+  border-radius: 24px;
+  background: var(--panel, #fff);
+  box-shadow: 0 16px 48px #17374d0c;
+  text-align: left;
+}
+.operator-recovery .operator-recovery-eyebrow {
+  color: #007c91;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+}
+.operator-recovery-card h1 { margin: 10px 0 16px; font-size: clamp(24px, 5vw, 30px); line-height: 1.15; }
+.operator-recovery-card p { color: var(--muted); font-size: 14px; line-height: 1.6; margin: 12px 0; }
+.operator-recovery-retry {
+  margin-top: 12px;
+  min-height: 44px;
+  padding: 12px 18px;
+  border: 1px solid #007c91;
+  border-radius: 12px;
+  background: #007c91;
+  color: white;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.operator-recovery-retry:disabled { cursor: wait; opacity: .65; }
+.operator-recovery-retry:focus-visible, .operator-recovery-help summary:focus-visible { outline: 3px solid #21c3dc; outline-offset: 4px; }
+.operator-recovery-card .operator-recovery-note { font-size: 12px; }
+.operator-recovery-help { border-top: 1px solid var(--line, #d9e2eb); margin-top: 20px; padding-top: 16px; font-size: 13px; line-height: 1.6; }
+.operator-recovery-help summary { cursor: pointer; font-weight: 700; }
+.operator-recovery-help ol { padding-left: 20px; margin-bottom: 0; }
+.operator-recovery-help li + li { margin-top: 12px; }
+.operator-recovery-help code { font-size: 12px; overflow-wrap: anywhere; }
+.operator-recovery-help > code { display: block; margin-top: 12px; }
+@media (max-width: 600px) {
+  .loading-screen.operator-recovery { padding: 24px 14px; }
+  .operator-recovery-retry { width: 100%; }
+}

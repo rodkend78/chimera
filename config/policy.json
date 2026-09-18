@@ -1,0 +1,294 @@
+{
+  "version": 1,
+  "defaultTier": "blocked",
+  "rules": [
+    {
+      "id": "rj-aws-identity-read",
+      "capability": "aws.read",
+      "resource": "dsh-tool:mcp__chimera_rj_aws__identity",
+      "tier": "auto"
+    },
+    {
+      "id": "rj-aws-instance-status-read",
+      "capability": "aws.read",
+      "resource": "dsh-tool:mcp__chimera_rj_aws__instance_status",
+      "tier": "auto"
+    },
+    {
+      "id": "account-read",
+      "capability": "browser.account.read",
+      "resource": "dsh-tool:mcp__chimera_account__read",
+      "tier": "auto"
+    },
+    {
+      "id": "account-wait",
+      "capability": "browser.account.wait",
+      "resource": "dsh-tool:mcp__chimera_account__await_share",
+      "tier": "auto"
+    },
+    {
+      "id": "browser-observe-ceo",
+      "capability": "browser.observe",
+      "resourcePrefix": "browser:ceo:",
+      "tier": "auto"
+    },
+    {
+      "id": "browser-navigate-chimera-demo",
+      "capability": "browser.navigate",
+      "resourcePrefix": "browser:ceo:http://chimera.local/",
+      "tier": "auto"
+    },
+    {
+      "id": "browser-interact-chimera-demo",
+      "capability": "browser.interact",
+      "resourcePrefix": "browser:ceo:http://chimera.local/",
+      "tier": "auto"
+    },
+    {
+      "id": "browser-navigate-external",
+      "capability": "browser.navigate",
+      "resourcePrefix": "browser:ceo:https://",
+      "tier": "confirm"
+    },
+    {
+      "id": "browser-interact-external",
+      "capability": "browser.interact",
+      "resourcePrefix": "browser:ceo:https://",
+      "tier": "confirm"
+    },
+    {
+      "id": "browser-input",
+      "capability": "browser.input",
+      "resourcePrefix": "browser:ceo:",
+      "tier": "confirm"
+    },
+    {
+      "id": "browser-control-ceo",
+      "capability": "browser.control",
+      "resource": "browser:ceo:browser-ceo-1",
+      "tier": "auto"
+    },
+    {
+      "id": "operator-direct-message-ceo",
+      "capability": "agent.message.direct_message",
+      "resource": "agent:ceo",
+      "tier": "auto"
+    },
+    {
+      "id": "ceo-task-handoff-registered-specialist",
+      "capability": "agent.message.task_handoff",
+      "resourcePrefix": "agent:",
+      "tier": "auto"
+    },
+    {
+      "id": "task-result-scoped-peer",
+      "capability": "agent.message.structured_result",
+      "resourcePrefix": "agent:",
+      "tier": "auto"
+    },
+    {
+      "id": "workspace-read",
+      "capability": "filesystem.read",
+      "resourcePrefix": "workspace/",
+      "tier": "auto"
+    },
+    {
+      "id": "workspace-write",
+      "capability": "filesystem.write",
+      "resourcePrefix": "workspace/",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-read-only-tools",
+      "capability": "filesystem.read",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "auto"
+    },
+    {
+      "id": "dsh-skill-read-tools",
+      "capability": "skill.read",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "auto"
+    },
+    {
+      "id": "dsh-observation-tools",
+      "capability": "runtime.read",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "auto"
+    },
+    {
+      "id": "dsh-agent-read-tools",
+      "capability": "agent.read",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "auto"
+    },
+    {
+      "id": "dsh-job-read-tools",
+      "capability": "job.read",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "auto"
+    },
+    {
+      "id": "dsh-schedule-read-tools",
+      "capability": "schedule.read",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "auto"
+    },
+    {
+      "id": "dsh-session-read-tools",
+      "capability": "session.read",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "auto"
+    },
+    {
+      "id": "dsh-task-read-tools",
+      "capability": "task.read",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "auto"
+    },
+    {
+      "id": "dsh-process-read-tools",
+      "capability": "process.read",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "auto"
+    },
+    {
+      "id": "dsh-side-effect-tools",
+      "capability": "filesystem.write",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-process-execute-tools",
+      "capability": "process.execute",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-network-tools",
+      "capability": "network.request",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-github-pr-read-tools",
+      "capability": "github.pr.read",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "auto"
+    },
+    {
+      "id": "dsh-github-pr-write-tools",
+      "capability": "github.pr.write",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-github-pr-merge-tools",
+      "capability": "github.pr.merge",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-mcp-tools",
+      "capability": "mcp.invoke",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-code-tools",
+      "capability": "code.execute",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-human-tools",
+      "capability": "human.interact",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-agent-message-tools",
+      "capability": "agent.message",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-agent-control-tools",
+      "capability": "agent.control",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-agent-spawn-tools",
+      "capability": "agent.spawn",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-control-tools",
+      "capability": "runtime.modify",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-job-control-tools",
+      "capability": "job.control",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-workflow-tools",
+      "capability": "workflow.execute",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-schedule-write-tools",
+      "capability": "schedule.write",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-session-write-tools",
+      "capability": "session.write",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "dsh-task-write-tools",
+      "capability": "task.write",
+      "resourcePrefix": "dsh-tool:",
+      "tier": "confirm"
+    },
+    {
+      "id": "model-invoke-approved",
+      "capability": "model.invoke",
+      "resourcePrefix": "model:",
+      "tier": "auto"
+    },
+    {
+      "id": "telegram-hq-message",
+      "capability": "external.message",
+      "resource": "telegram:chimera-hq",
+      "tier": "confirm"
+    },
+    {
+      "id": "credentials-never",
+      "capability": "credential.read",
+      "resourcePrefix": "",
+      "tier": "blocked"
+    },
+    {
+      "id": "infrastructure-never",
+      "capability": "infrastructure.mutate",
+      "resourcePrefix": "",
+      "tier": "blocked"
+    },
+    {
+      "id": "spend-never",
+      "capability": "money.spend",
+      "resourcePrefix": "",
+      "tier": "blocked"
+    }
+  ]
+}

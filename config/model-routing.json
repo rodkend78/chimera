@@ -1,0 +1,65 @@
+{
+  "schema": "chimera.model-routing.v1",
+  "region": "us-west-2",
+  "codex": {
+    "model": "gpt-5.6-sol",
+    "reasoningEffort": "high"
+  },
+  "openAiCompatibleProviders": [],
+  "media": {
+    "imageModel": "stability.stable-image-ultra-v1:1",
+    "videoModel": "luma.ray-v2:0",
+    "videoOutputS3Uri": null
+  },
+  "mantle": {
+    "project": "default",
+    "baseUrl": "https://bedrock-mantle.us-west-2.api.aws/v1",
+    "priorityModels": [
+      {
+        "id": "xai.grok-4.6",
+        "name": "Grok 4.6",
+        "provider": "xAI",
+        "inputModalities": ["TEXT", "IMAGE"],
+        "outputModalities": ["TEXT"],
+        "capabilities": ["conversation", "coding", "reasoning", "research"],
+        "strengths": ["research", "reasoning", "coding"]
+      },
+      {
+        "id": "google.gemma-4-31b",
+        "name": "Gemma 4 31B",
+        "provider": "Google",
+        "inputModalities": ["TEXT", "IMAGE", "VIDEO"],
+        "outputModalities": ["TEXT"],
+        "capabilities": ["conversation", "bulk", "reasoning", "research", "multimodal-understanding"]
+      }
+    ],
+    "routes": [
+      {
+        "id": "mantle-grok-research",
+        "model": "xai.grok-4.6",
+        "capabilities": ["research"],
+        "costClass": "premium"
+      },
+      {
+        "id": "mantle-gemma-multimodal",
+        "model": "google.gemma-4-31b",
+        "capabilities": ["multimodal-understanding", "bulk"],
+        "costClass": "low"
+      }
+    ]
+  },
+  "bedrockRoutes": [
+    {
+      "id": "bedrock-fast",
+      "model": "us.amazon.nova-micro-v1:0",
+      "capabilities": ["bulk"],
+      "costClass": "low"
+    },
+    {
+      "id": "bedrock-research",
+      "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "capabilities": ["research"],
+      "costClass": "medium"
+    }
+  ]
+}

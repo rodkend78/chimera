@@ -1,0 +1,12 @@
+node_modules/
+.chimera/
+app/dist/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+private-keys/
+runtime/
+.worktrees/
+.superpowers/

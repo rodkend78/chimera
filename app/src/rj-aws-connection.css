@@ -1,0 +1,16 @@
+.rj-aws-connection { padding: 20px; min-width: 0; border-bottom: 1px solid var(--border, #dce4ee); overflow-wrap: anywhere; }
+.rj-aws-connection header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.rj-aws-connection h3 { margin: 5px 0 0; }
+.rj-aws-connection > p, .rj-aws-connection small { font-size: 13px; line-height: 1.5; }
+.rj-aws-connection small { display: block; margin-top: 10px; }
+.rj-aws-status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 16px 0; }
+.rj-aws-status div { min-width: 0; padding: 10px; border: 1px solid var(--border, #dce4ee); border-radius: 10px; background: var(--surface, #f4f7fc); }
+.rj-aws-status dt { color: #56657a; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.rj-aws-status dd { margin: 5px 0 0; font-size: 13px; font-weight: 650; }
+.rj-aws-target, .rj-aws-receipt { display: grid; gap: 4px; }
+.rj-aws-target span, .rj-aws-receipt span { color: #56657a; }
+.rj-aws-target code, .rj-aws-receipt code { max-width: 100%; overflow-wrap: anywhere; }
+.rj-aws-connection button { min-height: 40px; max-width: 100%; padding: 8px 12px; border: 1px solid var(--border, #dce4ee); border-radius: 10px; background: var(--surface, #f4f7fc); color: inherit; cursor: pointer; font-weight: 700; }
+.rj-aws-connection button:disabled { opacity: .6; cursor: not-allowed; }
+.rj-aws-connection [role="alert"] { color: #943b3b; }
+@media (max-width: 620px) { .rj-aws-status { grid-template-columns: 1fr; } }

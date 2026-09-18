@@ -1,0 +1,30 @@
+.connection-alert { position:fixed; top:70px; left:20%; right:20px; z-index:100; padding:12px 18px; background:#422916; border:1px solid #df9b51; border-radius:8px; color:#ffe4ba; }
+.task-controls { padding:20px; margin-bottom:18px; }
+.task-controls p { color:#52647c; font-size:13px; line-height:1.5; }
+.browser-files-panel p { color:#b3c4ca; font-size:13px; line-height:1.5; }
+.queue-region > .task-controls { flex-shrink:0; }
+.task-controls form { display:flex; flex-wrap:wrap; gap:10px; }
+.task-controls input { flex:1; min-width:220px; }
+.task-controls select, .task-controls input, .task-controls button, .browser-files button { background:#102631; color:#e0f6f3; border:1px solid #36505a; border-radius:6px; padding:9px 12px; }
+.task-controls select { max-width:100%; }
+.task-controls button:not(:disabled):hover, .browser-files button:hover { border-color:#32cdbd; }
+.task-controls button:disabled { opacity:.45; }
+.task-action-notice { margin:14px 0; border:1px solid #b4dace; border-radius:10px; padding:12px; color:#245949; background:#effaf5; overflow-wrap:anywhere; }
+.task-action-notice strong { font-size:12px; }
+.task-action-notice p { margin:7px 0; color:inherit; }
+.task-action-notice small { display:block; font-size:12px; line-height:1.5; }
+.task-action-notice.failed { color:#714c18; background:#fff8ed; border-color:#e6c895; }
+.task-action-notice.pending { color:#24566a; background:#eef8fb; border-color:#bbdce8; }
+.history-load { margin:10px 14px; padding:7px 11px; border:1px solid #c5d7df; border-radius:7px; color:#21616c; background:#eefbfc; font-size:12px; cursor:pointer; }
+.history-load:disabled { opacity:.5; cursor:wait; }
+.browser-files { position:relative; padding:4px 12px; border-bottom:1px solid #233e49; }
+.browser-frame:has(.browser-files) { grid-template-rows:46px 52px auto minmax(0,1fr); }
+.browser-files > button { padding:4px 10px; font-size:12px; }
+.browser-files-panel { position:absolute; top:100%; right:12px; width:min(530px,90vw); background:#091e29; padding:18px; z-index:30; border:1px solid #36505a; border-radius:8px; box-shadow:0 12px 30px #0008; }
+.browser-files-panel > div { display:flex; justify-content:space-between; gap:12px; margin-top:12px; }
+.browser-files-panel > span { display:block; margin-top:12px; font-size:12px; color:#9bb4bf; }
+@media (max-width:760px) {
+  .browser-frame:has(.browser-files) { grid-template-rows:43px 49px auto minmax(0,1fr); }
+  .browser-files-panel { max-height:280px; overflow:auto; }
+  .connection-alert { top:74px; left:12px; right:12px; }
+}

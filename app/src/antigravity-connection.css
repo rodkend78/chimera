@@ -1,0 +1,11 @@
+.antigravity-connection { padding: 20px; min-width: 0; border-bottom: 1px solid var(--border, #dce4ee); overflow-wrap: anywhere; }
+.antigravity-connection header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.antigravity-connection h3 { margin: 5px 0 0; }
+.antigravity-connection p, .antigravity-connection small { line-height: 1.5; }
+.antigravity-connection p { font-size: 13px; }
+.antigravity-connection small { display: block; font-size: 12px; margin-top: 12px; }
+.antigravity-connection ul { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 7px; }
+.antigravity-connection li { border: 1px solid var(--border, #dce4ee); border-radius: 8px; padding: 5px 8px; font-size: 12px; }
+.antigravity-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.antigravity-actions button { min-height: 40px; padding: 8px 12px; max-width: 100%; border: 1px solid var(--border, #dce4ee); border-radius: 10px; background: var(--surface, #f4f7fc); color: inherit; cursor: pointer; }
+.antigravity-actions button:disabled { opacity: .6; cursor: wait; }

@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Chimera Account Companion",
+  "version": "0.1.0",
+  "minimum_chrome_version": "106",
+  "description": "Explicitly share the selected document read-only with a Chimera task.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1ddtYyKi68Xr6fTPEByjA+zzpM7maY7MPhEKCsg9IXGXcu2c+7ktEkXfCJU6RYHHxF2r+hsd8vXZvuA9yoTDJCMeg37JoycyZi5+Ph5xcSZXjE/Yw0sYcOE8iM0QWESZJMMcZGRTRO5BebS0AAnz7K+LJxBogBLacc0OiwW8JvOMDsq6AHNKza8rfh8exNw7kVFPRoBlEZIM+3x9fv77YbyFA3n/zK/fgyZI4MZj9qcebxuJeV4P0B2QGWxiHF7QfIibKxfk5fisysbyi9hY/cn5GqnXp92aZ+i/66EBijoNv3j+3HGqDXI59Dh2BTS4yEYz+i1jbCjom2GbtCltUQIDAQAB",
+  "permissions": ["activeTab", "scripting", "nativeMessaging"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "Share with Chimera" }
+}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "durationHours": 48,
+  "iterationSeconds": 3600,
+  "webRecoveryEvery": 4,
+  "fullSnapshotEvery": 6,
+  "source": {
+    "repository": "https://github.com/deepseek-ai/deepseek-harness.git",
+    "commit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e",
+    "tree": "53915efe4e2126cc7779b73dfc8a3bcec5318c44",
+    "archiveSha256": "8cc8169bc1ba6ef6f3c225ef6779f3b349fb15c437c6fd8f42bca19b31ef0d2b",
+    "version": "0.1.1-rc.2",
+    "node": ">=22.19.0",
+    "pnpm": "11.7.0"
+  },
+  "profiles": ["web", "headless"],
+  "presets": ["standard", "code", "minimal", "cordis"],
+  "modelBudgetUsd": 20,
+  "infrastructureCeilingUsd": 50,
+  "estimatedHourlyInfrastructureUsd": 0.105
+}

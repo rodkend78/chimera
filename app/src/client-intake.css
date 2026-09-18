@@ -1,0 +1,22 @@
+.client-intake { margin: 0 0 28px; padding: 18px; border: 1px solid #d7e0e7; border-radius: 18px; background: rgba(247,250,251,.88); }
+.client-intake-heading, .client-intake-actions, .client-intake-queue header { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.client-intake-heading h2 { margin: 4px 0; }
+.client-intake-actions { justify-content: flex-start; margin: 12px 0; }
+.client-intake-status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.client-intake-status > div, .client-intake-queue > li { min-width: 0; padding: 14px; border: 1px solid #d7e0e7; border-radius: 13px; background: #fff; }
+.client-intake-status strong, .client-intake-status span { display: block; }
+.client-intake-status span { margin-top: 5px; color: #126b78; text-transform: capitalize; }
+.client-intake-status p { margin: 7px 0 0; font-size: 12px; }
+.client-intake-error { padding: 10px 12px; border-left: 4px solid #a84632; background: #fff2ef; }
+.client-intake-form { margin-top: 16px; }
+.client-intake-form fieldset { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.client-intake-form label:last-of-type, .client-intake-form button, .client-intake-request { grid-column: 1 / -1; }
+.client-intake-request { color: #596477; font-size: 12px; }
+.client-intake-queue { display: grid; gap: 12px; list-style: none; margin: 0; padding: 0; }
+.client-intake-queue header span { padding: 4px 8px; border-radius: 999px; background: #e5f8fa; color: #126b78; font-size: 12px; }
+.client-intake-brief { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; }
+.client-intake-brief div { min-width: 0; }
+.client-intake-brief dt { color: #596477; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.client-intake-brief dd { margin: 3px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.client-intake-handoff { margin-top: 12px; padding: 12px; border: 1px solid #c2a264; border-radius: 10px; background: #fff9e9; }
+@media (max-width: 800px) { .client-intake-status, .client-intake-form fieldset, .client-intake-brief { grid-template-columns: minmax(0, 1fr); } }

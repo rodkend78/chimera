@@ -1,0 +1,43 @@
+{
+  "schema": "chimera.model-providers.v1",
+  "providers": [
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "protocol": "openai-chat-completions",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "models": [
+        {
+          "id": "openrouter/free",
+          "name": "OpenRouter Free Router"
+        },
+        {
+          "id": "~openai/gpt-latest",
+          "name": "OpenAI Latest"
+        },
+        {
+          "id": "~anthropic/claude-sonnet-latest",
+          "name": "Claude Sonnet Latest"
+        }
+      ]
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "protocol": "openai-chat-completions",
+      "baseUrl": "https://api.deepseek.com",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash"
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro"
+        }
+      ]
+    }
+  ]
+}

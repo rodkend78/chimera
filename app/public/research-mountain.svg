@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">Mountain landscape</title>
+  <desc id="desc">A code-authored illustration of layered mountains beneath a dawn sky.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#102a43"/>
+      <stop offset="0.62" stop-color="#3f779d"/>
+      <stop offset="1" stop-color="#f4c095"/>
+    </linearGradient>
+    <linearGradient id="ridge" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#e9eef2"/>
+      <stop offset="0.45" stop-color="#8ba7b8"/>
+      <stop offset="1" stop-color="#36566b"/>
+    </linearGradient>
+    <linearGradient id="foreground" x1="0" x2="0.9" y1="0" y2="1">
+      <stop offset="0" stop-color="#203d4f"/>
+      <stop offset="1" stop-color="#0c1d2a"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="22"/>
+    </filter>
+  </defs>
+  <rect width="1600" height="1000" fill="url(#sky)"/>
+  <circle cx="1170" cy="330" r="98" fill="#ffd8a8" opacity="0.82" filter="url(#glow)"/>
+  <circle cx="1170" cy="330" r="55" fill="#ffe8c5" opacity="0.95"/>
+  <path d="M0 720 190 555 350 680 570 370 770 630 1010 270 1280 620 1450 470 1600 620V1000H0Z" fill="url(#ridge)"/>
+  <path d="m570 370 78 102 62-43 70 82-132-22-80 71-95 23Z" fill="#f7fbfd" opacity="0.9"/>
+  <path d="m1010 270 122 173 80-75 115 151-172-73-117 87-124-3Z" fill="#f7fbfd" opacity="0.88"/>
+  <path d="M0 790 260 650 470 790 730 560 960 770 1240 540 1600 745V1000H0Z" fill="#294c60" opacity="0.9"/>
+  <path d="M0 850 310 720 555 865 835 690 1115 870 1400 705 1600 820V1000H0Z" fill="url(#foreground)"/>
+  <path d="M0 928c210-48 376-42 560 4 221 55 417 30 615-12 155-33 288-32 425 4v76H0Z" fill="#07131e" opacity="0.72"/>
+</svg>

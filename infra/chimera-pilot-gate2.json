@@ -1,0 +1,554 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Team RSI Chimera Gate 2 durable audit, immutable anchors, and separated signing custody roles.",
+  "Parameters": {
+    "ProjectTag": {
+      "Type": "String",
+      "Default": "TeamRsiChimera",
+      "AllowedPattern": "^[A-Za-z0-9._:/=+@-]+$"
+    },
+    "EnvironmentTag": {
+      "Type": "String",
+      "Default": "pilot",
+      "AllowedValues": ["pilot"]
+    },
+    "CostCeilingTag": {
+      "Type": "String",
+      "Default": "USD50-monthly-pilot",
+      "AllowedPattern": "^[A-Za-z0-9._:/=+@-]+$"
+    },
+    "LambdaArtifactBucket": {
+      "Type": "String",
+      "AllowedPattern": "^[a-z0-9.-]{3,63}$"
+    },
+    "AuditWriterArtifactKey": {
+      "Type": "String",
+      "AllowedPattern": "^[A-Za-z0-9!_.*'()/-]{1,1024}$"
+    },
+    "AuditAnchorWriterArtifactKey": {
+      "Type": "String",
+      "AllowedPattern": "^[A-Za-z0-9!_.*'()/-]{1,1024}$"
+    },
+    "RuntimeAuditStreamId": {
+      "Type": "String",
+      "Default": "pilot/runtime",
+      "AllowedPattern": "^[A-Za-z0-9._:/-]{1,256}$"
+    },
+    "SigningBrokerArtifactKey": {
+      "Type": "String",
+      "AllowedPattern": "^[A-Za-z0-9!_.*'()/-]{1,1024}$"
+    },
+    "SigningAuthorizerKeyId": {
+      "Type": "String",
+      "AllowedPattern": "^[A-Za-z0-9._:-]{1,256}$"
+    },
+    "SigningAuthorizerPublicKeyBase64": {
+      "Type": "String",
+      "AllowedPattern": "^[A-Za-z0-9+/=]+$"
+    },
+    "NostrPublicKey": {
+      "Type": "String",
+      "AllowedPattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "Resources": {
+    "PilotKmsKey": {
+      "Type": "AWS::KMS::Key",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "Chimera pilot envelope encryption for audit, anchors, and Nostr secret custody",
+        "EnableKeyRotation": true,
+        "KeyPolicy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AccountAdministration",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+                }
+              },
+              "Action": "kms:*",
+              "Resource": "*"
+            }
+          ]
+        },
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } },
+          { "Key": "CostCeiling", "Value": { "Ref": "CostCeilingTag" } }
+        ]
+      }
+    },
+    "PilotKmsAlias": {
+      "Type": "AWS::KMS::Alias",
+      "Properties": {
+        "AliasName": "alias/chimera-pilot-gate2",
+        "TargetKeyId": { "Ref": "PilotKmsKey" }
+      }
+    },
+    "AuditTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "BillingMode": "PAY_PER_REQUEST",
+        "DeletionProtectionEnabled": true,
+        "AttributeDefinitions": [
+          { "AttributeName": "streamId", "AttributeType": "S" },
+          { "AttributeName": "recordId", "AttributeType": "S" }
+        ],
+        "KeySchema": [
+          { "AttributeName": "streamId", "KeyType": "HASH" },
+          { "AttributeName": "recordId", "KeyType": "RANGE" }
+        ],
+        "PointInTimeRecoverySpecification": {
+          "PointInTimeRecoveryEnabled": true
+        },
+        "SSESpecification": {
+          "SSEEnabled": true,
+          "SSEType": "KMS",
+          "KMSMasterKeyId": { "Fn::GetAtt": ["PilotKmsKey", "Arn"] }
+        },
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } },
+          { "Key": "CostCeiling", "Value": { "Ref": "CostCeilingTag" } }
+        ]
+      }
+    },
+    "AuditAnchorBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "BucketKeyEnabled": true,
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "aws:kms",
+                "KMSMasterKeyID": { "Fn::GetAtt": ["PilotKmsKey", "Arn"] }
+              }
+            }
+          ]
+        },
+        "ObjectLockEnabled": true,
+        "ObjectLockConfiguration": {
+          "ObjectLockEnabled": "Enabled",
+          "Rule": {
+            "DefaultRetention": {
+              "Mode": "COMPLIANCE",
+              "Days": 30
+            }
+          }
+        },
+        "OwnershipControls": {
+          "Rules": [{ "ObjectOwnership": "BucketOwnerEnforced" }]
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } },
+          { "Key": "CostCeiling", "Value": { "Ref": "CostCeilingTag" } }
+        ]
+      }
+    },
+    "AuditAnchorBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": { "Ref": "AuditAnchorBucket" },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "DenyInsecureTransport",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                { "Fn::GetAtt": ["AuditAnchorBucket", "Arn"] },
+                { "Fn::Sub": "${AuditAnchorBucket.Arn}/*" }
+              ],
+              "Condition": {
+                "Bool": { "aws:SecureTransport": "false" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "NostrSigningSecret": {
+      "Type": "AWS::SecretsManager::Secret",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "Empty custody slot for a separately generated and validated Chimera Nostr private key",
+        "KmsKeyId": { "Ref": "PilotKmsKey" },
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } },
+          { "Key": "CostCeiling", "Value": { "Ref": "CostCeilingTag" } }
+        ]
+      }
+    },
+    "SigningReceiptTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "BillingMode": "PAY_PER_REQUEST",
+        "DeletionProtectionEnabled": true,
+        "AttributeDefinitions": [{ "AttributeName": "receiptId", "AttributeType": "S" }],
+        "KeySchema": [{ "AttributeName": "receiptId", "KeyType": "HASH" }],
+        "PointInTimeRecoverySpecification": { "PointInTimeRecoveryEnabled": true },
+        "SSESpecification": {
+          "SSEEnabled": true,
+          "SSEType": "KMS",
+          "KMSMasterKeyId": { "Fn::GetAtt": ["PilotKmsKey", "Arn"] }
+        },
+        "TimeToLiveSpecification": {
+          "AttributeName": "expiresAtEpoch",
+          "Enabled": true
+        },
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } },
+          { "Key": "CostCeiling", "Value": { "Ref": "CostCeilingTag" } }
+        ]
+      }
+    },
+    "PilotRuntimeRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": "ec2.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+          }]
+        },
+        "Policies": [{
+          "PolicyName": "ChimeraPilotAuditGateway",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": "lambda:InvokeFunction",
+                "Resource": { "Fn::GetAtt": ["AuditWriterFunction", "Arn"] }
+              },
+              {
+                "Effect": "Allow",
+                "Action": "lambda:InvokeFunction",
+                "Resource": { "Fn::GetAtt": ["SigningBrokerFunction", "Arn"] }
+              }
+            ]
+          }
+        }],
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } }
+        ]
+      }
+    },
+    "AuditWriterRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": "lambda.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+          }]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ChimeraConditionalAuditAppend",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query", "dynamodb:TransactWriteItems", "dynamodb:UpdateItem"],
+                "Resource": { "Fn::GetAtt": ["AuditTable", "Arn"] }
+              }, {
+                "Effect": "Allow",
+                "Action": ["kms:Decrypt", "kms:DescribeKey", "kms:Encrypt", "kms:GenerateDataKey"],
+                "Resource": { "Fn::GetAtt": ["PilotKmsKey", "Arn"] }
+              }]
+            }
+          },
+          {
+            "PolicyName": "ChimeraAuditWriterLogs",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+                "Resource": { "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*" }
+              }]
+            }
+          }
+        ],
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } }
+        ]
+      }
+    },
+    "AuditWriterFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Architectures": ["arm64"],
+        "Code": {
+          "S3Bucket": { "Ref": "LambdaArtifactBucket" },
+          "S3Key": { "Ref": "AuditWriterArtifactKey" }
+        },
+        "Environment": {
+          "Variables": { "CHIMERA_AUDIT_TABLE": { "Ref": "AuditTable" } }
+        },
+        "Handler": "index.handler",
+        "MemorySize": 256,
+        "Role": { "Fn::GetAtt": ["AuditWriterRole", "Arn"] },
+        "Runtime": "nodejs22.x",
+        "Timeout": 15,
+        "TracingConfig": { "Mode": "Active" },
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } },
+          { "Key": "CostCeiling", "Value": { "Ref": "CostCeilingTag" } }
+        ]
+      }
+    },
+    "AuditAnchorWriterRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": "lambda.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+          }]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ChimeraImmutableAuditAnchorWriter",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": ["dynamodb:GetItem", "dynamodb:Query"],
+                  "Resource": { "Fn::GetAtt": ["AuditTable", "Arn"] }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:PutObject",
+                  "Resource": { "Fn::Sub": "${AuditAnchorBucket.Arn}/anchors/*" }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["kms:Decrypt", "kms:DescribeKey", "kms:Encrypt", "kms:GenerateDataKey"],
+                  "Resource": { "Fn::GetAtt": ["PilotKmsKey", "Arn"] }
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "ChimeraAuditAnchorLogs",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+                "Resource": { "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*" }
+              }]
+            }
+          }
+        ],
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } }
+        ]
+      }
+    },
+    "AuditAnchorWriterFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Architectures": ["arm64"],
+        "Code": {
+          "S3Bucket": { "Ref": "LambdaArtifactBucket" },
+          "S3Key": { "Ref": "AuditAnchorWriterArtifactKey" }
+        },
+        "Environment": {
+          "Variables": {
+            "CHIMERA_AUDIT_ANCHOR_BUCKET": { "Ref": "AuditAnchorBucket" },
+            "CHIMERA_AUDIT_TABLE": { "Ref": "AuditTable" }
+          }
+        },
+        "Handler": "index.handler",
+        "MemorySize": 256,
+        "Role": { "Fn::GetAtt": ["AuditAnchorWriterRole", "Arn"] },
+        "Runtime": "nodejs22.x",
+        "Timeout": 30,
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } },
+          { "Key": "CostCeiling", "Value": { "Ref": "CostCeilingTag" } }
+        ]
+      }
+    },
+    "AuditAnchorSchedule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Description": "Periodically anchor the Chimera runtime audit head in immutable S3 storage",
+        "ScheduleExpression": "rate(15 minutes)",
+        "State": "ENABLED",
+        "Targets": [{
+          "Arn": { "Fn::GetAtt": ["AuditAnchorWriterFunction", "Arn"] },
+          "Id": "AuditAnchorWriter",
+          "Input": { "Fn::Sub": "{\"streamId\":\"${RuntimeAuditStreamId}\"}" }
+        }]
+      }
+    },
+    "AllowScheduledAuditAnchor": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": { "Ref": "AuditAnchorWriterFunction" },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": { "Fn::GetAtt": ["AuditAnchorSchedule", "Arn"] }
+      }
+    },
+    "SigningBrokerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": "lambda.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+          }]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ChimeraSigningBrokerCustody",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "secretsmanager:GetSecretValue",
+                  "Resource": { "Ref": "NostrSigningSecret" }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["kms:Decrypt", "kms:DescribeKey", "kms:Encrypt", "kms:GenerateDataKey"],
+                  "Resource": { "Fn::GetAtt": ["PilotKmsKey", "Arn"] }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "dynamodb:PutItem",
+                  "Resource": { "Fn::GetAtt": ["SigningReceiptTable", "Arn"] }
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "ChimeraSigningBrokerLogs",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+                "Resource": { "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*" }
+              }]
+            }
+          }
+        ],
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } }
+        ]
+      }
+    },
+    "SigningBrokerFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Architectures": ["arm64"],
+        "Code": {
+          "S3Bucket": { "Ref": "LambdaArtifactBucket" },
+          "S3Key": { "Ref": "SigningBrokerArtifactKey" }
+        },
+        "Environment": {
+          "Variables": {
+            "CHIMERA_NOSTR_PUBLIC_KEY": { "Ref": "NostrPublicKey" },
+            "CHIMERA_NOSTR_SECRET_ID": { "Ref": "NostrSigningSecret" },
+            "CHIMERA_SIGNING_AUTHORIZER_KEY_ID": { "Ref": "SigningAuthorizerKeyId" },
+            "CHIMERA_SIGNING_AUTHORIZER_PUBLIC_KEY_BASE64": { "Ref": "SigningAuthorizerPublicKeyBase64" },
+            "CHIMERA_SIGNING_RECEIPT_TABLE": { "Ref": "SigningReceiptTable" }
+          }
+        },
+        "Handler": "index.handler",
+        "MemorySize": 256,
+        "Role": { "Fn::GetAtt": ["SigningBrokerRole", "Arn"] },
+        "Runtime": "nodejs22.x",
+        "Timeout": 15,
+        "Tags": [
+          { "Key": "Project", "Value": { "Ref": "ProjectTag" } },
+          { "Key": "Environment", "Value": { "Ref": "EnvironmentTag" } },
+          { "Key": "CostCeiling", "Value": { "Ref": "CostCeilingTag" } }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "AuditTableName": {
+      "Value": { "Ref": "AuditTable" }
+    },
+    "AuditAnchorBucketName": {
+      "Value": { "Ref": "AuditAnchorBucket" }
+    },
+    "NostrSigningSecretArn": {
+      "Value": { "Ref": "NostrSigningSecret" }
+    },
+    "PilotRuntimeRoleArn": {
+      "Value": { "Fn::GetAtt": ["PilotRuntimeRole", "Arn"] }
+    },
+    "SigningBrokerRoleArn": {
+      "Value": { "Fn::GetAtt": ["SigningBrokerRole", "Arn"] }
+    },
+    "AuditWriterRoleArn": {
+      "Value": { "Fn::GetAtt": ["AuditWriterRole", "Arn"] }
+    },
+    "AuditWriterFunctionName": {
+      "Value": { "Ref": "AuditWriterFunction" }
+    },
+    "AuditAnchorWriterRoleArn": {
+      "Value": { "Fn::GetAtt": ["AuditAnchorWriterRole", "Arn"] }
+    },
+    "AuditAnchorWriterFunctionName": {
+      "Value": { "Ref": "AuditAnchorWriterFunction" }
+    },
+    "SigningBrokerFunctionName": {
+      "Value": { "Ref": "SigningBrokerFunction" }
+    },
+    "SigningReceiptTableName": {
+      "Value": { "Ref": "SigningReceiptTable" }
+    }
+  }
+}

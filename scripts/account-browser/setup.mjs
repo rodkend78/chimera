@@ -1,0 +1,13 @@
+import { prepareCompanion, uninstallCompanion, EXPECTED_ORIGIN } from '../../src/account-browser/installer.mjs'
+
+const [command, ...args] = process.argv.slice(2)
+const help = 'Usage: node scripts/account-browser/setup.mjs dry-run|prepare --destination ABSOLUTE --host-manifest-dir ABSOLUTE --node-path ABSOLUTE --socket-path ABSOLUTE\nUninstall: node scripts/account-browser/setup.mjs uninstall --receipt-path ABSOLUTE\n'
+const setupInstructions = 'The normal repository server discovers only <repo>/.chimera/account-browser/install/runtime.json: use <repo>/.chimera/account-browser/install as destination. Arbitrary destinations are package preparation only and are not auto-discovered; there is no runtimeConfigPath override. Chimera Work uses <repo>/.chimera/account-browser/chrome as its dedicated user-data directory: register the host in its NativeMessagingHosts subdirectory. Destination and host-manifest parents must already exist; the socket and chrome directories must be owned by you with mode 0700. Existing installations with a different manifest directory require explicit stop and receipt-validated uninstall before preparing again. After explicit preparation, restart the repository server and use My accounts > Open Chrome. Load extensionPath using Developer mode > Load unpacked in that dedicated instance, not RJ\'s automation browser. Compare the exact Pairing ID in the popup and Chimera before approval, then Finish pairing in the popup. Native Chrome operation remains unverified.'
+try {
+  const values = {}; const keys = { '--destination': 'destination', '--host-manifest-dir': 'hostManifestDir', '--node-path': 'nodePath', '--socket-path': 'socketPath', '--receipt-path': 'receiptPath' }
+  for (let i = 0; i < args.length; i += 2) { const key = keys[args[i]]; if (!key || !args[i + 1] || values[key]) throw new Error('Invalid arguments'); values[key] = args[i + 1] }
+  if (command === 'dry-run') process.stdout.write(JSON.stringify({ status: 'not-installed', allowedOrigin: EXPECTED_ORIGIN, requested: values, instructions: `Nothing has been installed. ${setupInstructions}` }, null, 2) + '\n')
+  else if (command === 'prepare') { const result = await prepareCompanion(values); process.stdout.write(JSON.stringify({ ...result, instructions: `Package prepared only. ${setupInstructions}` }, null, 2) + '\n') }
+  else if (command === 'uninstall' && Object.keys(values).length === 1) process.stdout.write(JSON.stringify(await uninstallCompanion(values)) + '\n')
+  else throw new Error('Choose an explicit command')
+} catch (error) { process.stderr.write(error.message + '\n' + help); process.exitCode = 1 }
