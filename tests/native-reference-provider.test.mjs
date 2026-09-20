@@ -58,8 +58,9 @@ test('native provider rejects credential and private-key persona material withou
     await assert.rejects(provider.savePersona({
       agentId: 'native-agent', content: 'OPENAI_API_KEY=not-a-real-key', changedBy: 'rod',
     }), /NATIVE_PERSONA_CONTENT_INVALID/)
+    const privateKeyHeader = ['-----BEGIN', 'PRIVATE KEY-----'].join(' ')
     await assert.rejects(provider.savePersona({
-      agentId: 'native-agent', content: '-----BEGIN PRIVATE KEY-----\nsecret', changedBy: 'rod',
+      agentId: 'native-agent', content: `${privateKeyHeader}\nsecret`, changedBy: 'rod',
     }), /NATIVE_PERSONA_CONTENT_INVALID/)
     assert.equal(audit.entries().some((entry) => JSON.stringify(entry).includes('not-a-real-key')), false)
     assert.equal(audit.entries().some((entry) => JSON.stringify(entry).includes('PRIVATE KEY')), false)
@@ -76,7 +77,11 @@ test('native provider and descriptor helper reject DSA and encrypted PEM headers
   const audit = new MemoryAuditLog()
   try {
     const provider = await NativeAgentReferenceProvider.open({ root: directory, audit })
-    for (const header of ['-----BEGIN DSA PRIVATE KEY-----', '-----BEGIN ENCRYPTED PRIVATE KEY-----']) {
+    const headers = [
+      ['-----BEGIN', 'DSA PRIVATE KEY-----'].join(' '),
+      ['-----BEGIN', 'ENCRYPTED PRIVATE KEY-----'].join(' '),
+    ]
+    for (const header of headers) {
       const content = `${header}\nsecret\n-----END PRIVATE KEY-----`
       await assert.rejects(provider.savePersona({ agentId: 'native-agent', content, changedBy: 'rod' }), /NATIVE_PERSONA_CONTENT_INVALID/)
       const helperResult = await runFilesystem({
