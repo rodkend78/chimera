@@ -15,9 +15,10 @@ export async function workspaceFilesystem(workspace, request) {
     return value.split(sep)
   })
   return new Promise((resolvePromise, reject) => {
+    const maxBuffer = request?.operation === 'snapshot-tree' ? 32 * 1024 * 1024 : 8 * 1024 * 1024
     const child = execFile('/usr/bin/python3', ['-I', '-B', helper], {
       env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' }, timeout: 30_000,
-      maxBuffer: 8 * 1024 * 1024,
+      maxBuffer,
     }, (error, stdout) => {
       if (error) return reject(Object.assign(new Error('WORKER_FILESYSTEM_UNAVAILABLE'), { code: 'WORKER_FILESYSTEM_UNAVAILABLE' }))
       try {
