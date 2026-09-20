@@ -346,6 +346,7 @@ test('browser runtime authorizes an auto fabric that uses different routes for C
     responder: async () => ({ summary: 'Specialist researched the evidence.' }),
   })
   const provider = createTaskAwareModelRouter({
+    eligibility: () => ({ connectionEnabled: true, agentAllowed: true, executorAllowed: true, requirementsSatisfied: true, pinSatisfied: true, reasons: [] }),
     routes: [
       { id: 'codex', router: ceo, capabilities: ['orchestration', 'coding', 'reasoning'], costClass: 'subscription' },
       { id: 'bedrock-research', router: specialist, capabilities: ['research'], costClass: 'medium' },

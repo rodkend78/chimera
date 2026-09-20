@@ -270,7 +270,7 @@ export class AgentHarnessWorker {
       const workspace = execution.workspace?.state && bounded(execution.workspace.path, 4096)
         ? execution.workspace
         : this.workspace
-      const result = await executor(structuredClone(args), {
+      const result = await executor(structuredClone(exec.arguments), {
         workspace,
         agentId: this.manifest.agentId,
         taskId: this.grant.payload.taskId,

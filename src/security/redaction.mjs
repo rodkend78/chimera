@@ -18,7 +18,10 @@ function redactValue(value, depth = 0) {
   if (!value || typeof value !== 'object') return value
   const projected = {}
   for (const [key, entry] of Object.entries(value).slice(0, 256)) {
-    projected[key] = SENSITIVE_KEY.test(`_${key}_`) ? REDACTED : redactValue(entry, depth + 1)
+    Object.defineProperty(projected, key, {
+      value: SENSITIVE_KEY.test(`_${key}_`) ? REDACTED : redactValue(entry, depth + 1),
+      enumerable: true, configurable: true, writable: true,
+    })
   }
   return projected
 }

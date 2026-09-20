@@ -2,8 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { chromium } from 'playwright'
 import { createServer } from 'vite'
+import { approvalReviewForTool } from '../src/dsh/enforcement-adapter.mjs'
 
-async function fixture(t, { long = false, handle, extra = false } = {}) {
+async function fixture(t, { long = false, handle, extra = false, reviewFields = {} } = {}) {
   const server = await createServer({ configFile: new URL('../app/vite.config.js', import.meta.url).pathname,
     server: { host: '127.0.0.1', port: 0, hmr: false, proxy: {} } })
   await server.listen()
@@ -13,7 +14,7 @@ async function fixture(t, { long = false, handle, extra = false } = {}) {
   page.setDefaultTimeout(2500)
   const writes = [], errors = []
   const fields = { Repository: 'Fixture repository', 'Expected head SHA': 'a'.repeat(40),
-    Description: long ? 'Review the exact bounded fixture action. '.repeat(80) : 'Read-only UI review fixture' }
+    Description: long ? 'Review the exact bounded fixture action. '.repeat(80) : 'Read-only UI review fixture', ...reviewFields }
   const decision = { actionId: 'fixture-action', title: 'Review fixture action', detail: 'No real action will execute in this test.',
     agent: { agentId: 'ace' }, actionDiff: { review: { fields } } }
   const state = { agent: { id: 'ceo', name: 'RJ', status: 'Idle' }, controller: { type: 'agent', id: 'ceo' }, suspended: false,
@@ -48,6 +49,21 @@ async function fixture(t, { long = false, handle, extra = false } = {}) {
   await dialog.waitFor()
   return { page, dialog, trigger, fields, writes, errors }
 }
+
+test('approval previews preserve command newlines and show file content as inert text', { timeout: 15000 }, async t => {
+  const command = '# comment\nprintf proposed-action'
+  const content = '<script>notExecutable()</script>\nsecond line'
+  const reviewFields = { ...approvalReviewForTool('bash', { command }).fields,
+    Content: approvalReviewForTool('write', { path: 'scratch/file', content }).fields.Content }
+  const { dialog, writes, errors } = await fixture(t, { reviewFields })
+  const field = label => dialog.locator(`.decision-review > div:has(> dt:text-is("${label}")) > dd`)
+  assert.equal(await field('Command').textContent(), command)
+  assert.equal(await field('Command').evaluate(node => getComputedStyle(node).whiteSpace), 'pre-wrap')
+  assert.equal(await field('Content').textContent(), content)
+  assert.equal(await dialog.locator('script').count(), 0)
+  assert.deepEqual(writes, [])
+  assert.deepEqual(errors, [])
+})
 
 test('decision review opens with non-action focus and contains keyboard navigation', { timeout: 15000 }, async t => {
   const { page, dialog, writes, errors } = await fixture(t)

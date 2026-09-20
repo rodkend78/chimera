@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events'
+import net from 'node:net'
+import { createPublicEgressProxy, isPublicAddress } from './public-egress-proxy.mjs'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -152,6 +154,8 @@ export function assertSafeBrowserUrl(value) {
   if (PRIVATE_HOSTS.has(host) || isPrivateIpv4(host) || isPrivateIpv6(host) || host.endsWith('.local')) {
     throw new TypeError('Private-network browser destinations are blocked')
   }
+  const address = host.replace(/^\[|\]$/g, '')
+  if (net.isIP(address) && !isPublicAddress(address)) throw new TypeError('Private-network browser destinations are blocked')
   return parsed.href
 }
 
@@ -260,21 +264,29 @@ export class ChromiumBrowserExecutor extends EventEmitter {
   #temporaryCallbacks
   #fileChooser
   #downloads = new Map()
+  #egress
 
   constructor({
     profileDir,
     headless = process.env.CHIMERA_HEADLESS === 'false' ? false : (process.env.CHIMERA_HEADED === 'true' ? false : true),
     launchArgs = [],
+    egressLookup,
   } = {}) {
     super()
     if (!profileDir) throw new TypeError('profileDir is required')
     if (!Array.isArray(launchArgs) || launchArgs.some((argument) => typeof argument !== 'string')) {
       throw new TypeError('launchArgs must be an array of strings')
     }
+    // Chromium's user arguments override Playwright's proxy flags. Only these
+    // presentation flags are supported; do not permit network/sandbox overrides.
+    if (launchArgs.some(argument => !/^--(?:disable-dev-shm-usage|start-maximized|window-size=\d{1,5},\d{1,5})$/.test(argument))) {
+      throw new TypeError('BROWSER_LAUNCH_ARGUMENT_BLOCKED')
+    }
     this.profileDir = profileDir
     this.sessionFile = join(profileDir, 'chimera-tabs.json')
     this.headless = headless
     this.launchArgs = [...launchArgs]
+    this.egressLookup = egressLookup
     this.#temporaryCallbacks = new TemporaryCallbackPolicy()
   }
 
@@ -288,6 +300,14 @@ export class ChromiumBrowserExecutor extends EventEmitter {
     this.#starting = this.#start()
     try {
       return await this.#starting
+    } catch (error) {
+      await this.#context?.close().catch(() => {})
+      this.#context = undefined
+      this.#activePage = undefined
+      this.#ids.clear()
+      await this.#egress?.close().catch(() => {})
+      this.#egress = undefined
+      throw error
     } finally {
       this.#starting = undefined
     }
@@ -300,11 +320,21 @@ export class ChromiumBrowserExecutor extends EventEmitter {
         await rm(join(this.profileDir, lockFile), { force: true })
       } catch {}
     }
-    this.#context = await chromium.launchPersistentContext(this.profileDir, {
+    this.#egress = await createPublicEgressProxy({ lookup: this.egressLookup,
+      allowsCallback: url => this.#temporaryCallbacks.allows(url) })
+    try {
+      this.#context = await chromium.launchPersistentContext(this.profileDir, {
       headless: this.headless,
       viewport: VIEWPORT,
-      args: ['--disable-dev-shm-usage', '--password-store=basic', ...this.launchArgs],
-    })
+      serviceWorkers: 'block',
+      proxy: this.#egress.settings,
+      args: ['--disable-dev-shm-usage', '--password-store=basic', ...this.launchArgs,
+        '--disable-quic', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'],
+      })
+    } catch (error) {
+      await this.#egress.close(); this.#egress = undefined
+      throw error
+    }
     await this.#context.route('**/*', async (route) => {
       try {
         this.#assertAllowedNavigation(route.request().url())
@@ -652,7 +682,10 @@ export class ChromiumBrowserExecutor extends EventEmitter {
     this.#downloads.clear()
     this.#activePage = undefined
     this.#ids.clear()
-    await context.close()
+    try { await context.close() } finally {
+      await this.#egress?.close()
+      this.#egress = undefined
+    }
     return { suspended: true, wasRunning: true }
   }
 

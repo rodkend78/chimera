@@ -7,7 +7,7 @@ function displayAgent(agentId) {
 }
 
 function semanticReview(value) {
-  if (value === undefined) return null
+  if (value === undefined) throw new TypeError('WORKER_APPROVAL_REVIEW_INVALID')
   const valuePrototype = value && typeof value === 'object' ? Object.getPrototypeOf(value) : null
   const fieldsPrototype = value?.fields && typeof value.fields === 'object' ? Object.getPrototypeOf(value.fields) : null
   if (!value || typeof value !== 'object' || Array.isArray(value)

@@ -34,7 +34,7 @@ jobs:
         run: npm ci
 
       - name: Install Linux Harness sandbox
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap python3
 
       # Ubuntu 24.04 restricts unprivileged user namespaces by default. The
       # upstream Bubblewrap project enables them the same way on its ephemeral

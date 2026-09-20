@@ -1,5 +1,7 @@
 .connection-alert { position:fixed; top:70px; left:20%; right:20px; z-index:100; padding:12px 18px; background:#422916; border:1px solid #df9b51; border-radius:8px; color:#ffe4ba; }
 .task-controls { padding:20px; margin-bottom:18px; }
+/* Approval text must preserve command and diff semantics, including newlines. */
+.decision-review dd { white-space:pre-wrap; unicode-bidi:plaintext; }
 .task-controls p { color:#52647c; font-size:13px; line-height:1.5; }
 .browser-files-panel p { color:#b3c4ca; font-size:13px; line-height:1.5; }
 .queue-region > .task-controls { flex-shrink:0; }
