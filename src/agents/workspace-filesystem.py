@@ -5,6 +5,7 @@ one component at a time with O_NOFOLLOW; every subsequent operation uses dir_fd.
 No shell, imports from the workspace, or user-supplied Python are accepted.
 """
 import errno
+import base64
 import fnmatch
 import functools
 import json
@@ -14,6 +15,7 @@ import stat
 import sys
 
 LIMIT = 1024 * 1024
+SNAPSHOT_TREE_BYTES = 16 * 1024 * 1024
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
@@ -245,10 +247,100 @@ def discover(root, request):
     return dict(matches=results, **coverage)
 
 
+def snapshot(root, request):
+    """Read one runtime-owned manifest/mount file through held descriptors.
+
+    This intentionally is narrower than the public read operation: it exists
+    for restart-safe continuity reconstruction and never accepts scratch or an
+    arbitrary root-relative path.
+    """
+    path = request.get('path')
+    if not isinstance(path, str) or path != 'manifest.json' and not path.startswith('mounts/'):
+        raise Rejected('WORKER_READ_OUTSIDE_WORKSPACE')
+    components = parts(path)
+    if components[0] not in ('manifest.json', 'mounts'):
+        raise Rejected('WORKER_READ_OUTSIDE_WORKSPACE')
+    fd, name = parent(root, components)
+    try:
+        return {'path': path, 'base64': base64.b64encode(read_at(fd, name)).decode('ascii')}
+    finally:
+        os.close(fd)
+
+
+def snapshot_tree(root, request):
+    """Read one bounded mounts tree while retaining descriptor-relative bytes."""
+    path = request.get('path')
+    if not isinstance(path, str) or not path.startswith('mounts/'):
+        raise Rejected('WORKER_READ_OUTSIDE_WORKSPACE')
+    components = parts(path)
+    if components[0] != 'mounts':
+        raise Rejected('WORKER_READ_OUTSIDE_WORKSPACE')
+    fd, name = parent(root, components)
+    entries = []
+    scanned = 0
+    total_bytes = 0
+    truncated = False
+
+    def walk(directory_fd, prefix, depth=0):
+        nonlocal scanned, total_bytes, truncated
+        if depth > 64 or len(entries) >= 512:
+            truncated = True
+            return
+        with os.scandir(directory_fd) as children:
+            for child in children:
+                if scanned >= 10000 or len(entries) >= 512:
+                    truncated = True
+                    return
+                scanned += 1
+                if child.name.lower() == '.git' or child.is_symlink():
+                    continue
+                child_path = prefix + '/' + child.name
+                if child.is_dir(follow_symlinks=False):
+                    child_fd = os.open(child.name, DIR_FLAGS, dir_fd=directory_fd)
+                    try:
+                        walk(child_fd, child_path, depth + 1)
+                    finally:
+                        os.close(child_fd)
+                elif child.is_file(follow_symlinks=False):
+                    info = os.stat(child.name, dir_fd=directory_fd, follow_symlinks=False)
+                    if info.st_size > SNAPSHOT_TREE_BYTES - total_bytes:
+                        truncated = True
+                        return
+                    total_bytes += info.st_size
+                    entries.append({
+                        'path': child_path,
+                        'base64': base64.b64encode(read_at(directory_fd, child.name)).decode('ascii'),
+                    })
+                if truncated:
+                    return
+
+    try:
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode):
+            raise Rejected('WORKER_SYMLINK_ESCAPE_BLOCKED')
+        child_fd = os.open(name, DIR_FLAGS, dir_fd=fd)
+        try:
+            walk(child_fd, path)
+        finally:
+            os.close(child_fd)
+    finally:
+        os.close(fd)
+    return {
+        'entries': sorted(entries, key=lambda entry: entry['path']),
+        'truncated': truncated,
+        'scannedEntries': scanned,
+        'bytes': total_bytes,
+    }
+
+
 def execute(request):
     root = os.open(request['root'], DIR_FLAGS)
     try:
         operation = request['operation']
+        if operation == 'snapshot':
+            return snapshot(root, request)
+        if operation == 'snapshot-tree':
+            return snapshot_tree(root, request)
         if operation in ('glob', 'grep'):
             return discover(root, request)
         components = parts(request['path'])
