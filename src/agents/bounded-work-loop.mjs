@@ -133,6 +133,9 @@ export async function runBoundedAgentLoop({
   const toolContracts = Object.fromEntries(tools.map((tool) => [tool, structuredClone(TOOL_CONTRACTS[tool] ?? {})]))
   const agentId = context.specialistAgent?.agentId
   if (!bounded(agentId, 64) || !bounded(context.taskId, 256)) throw new TypeError('AGENT_LOOP_CONTEXT_INVALID')
+  if (context.nodeId !== undefined && context.nodeId !== null && !bounded(context.nodeId, 128)) {
+    throw new TypeError('AGENT_LOOP_CONTEXT_INVALID')
+  }
 
   const observations = []
   let toolCalls = 0
@@ -183,6 +186,7 @@ export async function runBoundedAgentLoop({
     await onEvent({
       messageId: `chat-${crypto.randomUUID()}`,
       taskId: context.taskId,
+      ...(context.nodeId ? { nodeId: context.nodeId } : {}),
       senderAgentId: agentId,
       recipientAgentId: 'harness',
       kind: 'tool_request',
@@ -218,6 +222,13 @@ export async function runBoundedAgentLoop({
           rootCallId: `task-${context.taskId}`,
         }, {
           ...execution,
+          // The model only proposes the tool name and arguments. Assignment
+          // identity comes from the runtime-owned loop context and signed
+          // handoff, never from those arguments or model output fields.
+          taskId: context.taskId,
+          nodeId: context.nodeId ?? execution.nodeId ?? null,
+          assignmentId: context.sourceMessageId ?? execution.assignmentId ?? null,
+          canonicalAssignmentId: context.canonicalAssignmentId ?? execution.canonicalAssignmentId ?? null,
           assertTaskActive: assertActive,
           assertActive: async () => {
             assertActive()
@@ -234,10 +245,23 @@ export async function runBoundedAgentLoop({
     while (observations.length > 1 && Buffer.byteLength(JSON.stringify(observations)) > MAX_OBSERVATION_BYTES) observations.shift()
     await onCheckpoint({ stage: 'tool-completed', agentId, turn: index + 1, toolCalls, tool: turn.toolCall.name, callId, summary: `${turn.toolCall.name} ${outcome.status}.`, effectOutcome: outcome.status, observation: durableObservation(observation) })
     assertActive()
+    if (outcome.status === 'unknown' || outcome.effectOutcome === 'unknown' || outcome.dispatchState === 'unknown') {
+      const failure = coded('AGENT_LOOP_TOOL_OUTCOME_UNKNOWN')
+      failure.callId = callId
+      failure.taskId = context.taskId
+      failure.nodeId = context.nodeId ?? execution.nodeId ?? null
+      failure.assignmentId = context.sourceMessageId ?? execution.assignmentId ?? null
+      failure.agentId = agentId
+      failure.tool = turn.toolCall.name
+      failure.effectOutcome = 'unknown'
+      failure.observation = durableObservation(observation)
+      throw failure
+    }
     if (isPeer && outcome.terminal) return { status: outcome.status, summary: outcome.summary, toolCalls, observations: observations.map(durableObservation) }
     await onEvent({
       messageId: `chat-${crypto.randomUUID()}`,
       taskId: context.taskId,
+      ...(context.nodeId ? { nodeId: context.nodeId } : {}),
       senderAgentId: 'harness',
       recipientAgentId: agentId,
       kind: 'tool_result',

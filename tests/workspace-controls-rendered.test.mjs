@@ -21,6 +21,7 @@ test('rendered workspace reconnects, guides and stops a task, then explicitly co
     agent: { id: 'ceo', name: 'RJ', status: 'Working', model: 'Fixture' },
     browser: { running: true, tabs: [{ tabId: 'one', title: 'Fixture', url: 'about:blank', active: true }] },
     controller: { type: 'agent', id: 'ceo' }, suspended: false, hourlyCost: null,
+    draftScope: { schema: 'chimera.draft-scope.v1', workspaceId: 'workspace-controls-fixture', operatorId: 'operator-fixture' },
     activity: [], recentEvents: [], decisions: [], audit: { valid: true },
     models: { selected: { providerId: 'fixture', model: 'fixture', modelName: 'Fixture' }, providers: [{ id: 'fixture', name: 'Fixture', configured: true, models: [{ id: 'fixture', name: 'Fixture', availability: 'verified-route', capabilities: ['conversation'] }] }] },
     auth: { codex: { connected: true, status: 'connected' } },
@@ -41,7 +42,11 @@ test('rendered workspace reconnects, guides and stops a task, then explicitly co
       }
       if (path === '/api/state') return route.fulfill({ json: state })
       if (path === '/api/tasks' && !body) return route.fulfill({ json: { tasks: [{ taskId: 'older-task', objective: 'Older completed task', status: 'completed' }], nextCursor: null } })
-      if (path === '/api/conversations/messages' && !body) return route.fulfill({ json: { messages: [{ messageId: 'older-message', conversationId: new URL(route.request().url()).searchParams.get('conversationId'), role: 'human', senderAgentId: 'rod', recipientAgentIds: ['ceo'], content: 'Earlier project context', kind: 'message', createdAt: new Date().toISOString(), status: 'completed' }], nextCursor: null } })
+      if (path === '/api/conversations/messages' && !body) {
+        const conversationId = new URL(route.request().url()).searchParams.get('conversationId')
+        const taskId = conversationId?.startsWith('task:') ? conversationId.slice('task:'.length) : null
+        return route.fulfill({ json: { messages: [{ messageId: 'older-message', conversationId, ...(taskId ? { taskId } : {}), role: 'human', senderAgentId: 'rod', recipientAgentIds: ['ceo'], content: 'Earlier project context', kind: 'message', createdAt: new Date().toISOString(), status: 'completed' }], nextCursor: null } })
+      }
       if (path === '/api/browser/files') return route.fulfill({ json: { status: 'allowed', result: { upload: { pending: false }, downloads: [] } } })
       calls.push({ path, body })
       if (path === '/api/tasks/cancel') { state.tasks[0].status = 'cancelled'; state.agent.status = 'Idle' }
@@ -53,24 +58,25 @@ test('rendered workspace reconnects, guides and stops a task, then explicitly co
     await page.getByRole('navigation', { name: 'Primary navigation' }).waitFor()
     assert.equal(await page.title(), 'Chimera Browser Workspace')
     assert.ok(initialization >= 2)
-    await page.getByText('Cost not measured', { exact: false }).waitFor()
+    await page.getByRole('region', { name: 'Conversation composer', exact: true }).waitFor()
     await page.getByRole('button', { name: 'Work', exact: true }).click()
-    await page.getByRole('region', { name: 'Task recovery and control' }).waitFor()
-    await page.getByRole('textbox', { name: 'Task guidance' }).fill('Use an accessible form')
-    await page.getByRole('button', { name: 'Guide task', exact: true }).click()
+    const controls = page.getByRole('region', { name: 'Task recovery and control' })
+    await controls.waitFor()
+    await controls.getByRole('textbox', { name: 'Task guidance' }).fill('Use an accessible form')
+    await controls.getByRole('button', { name: 'Guide task', exact: true }).click()
     await page.getByText('Guidance saved for next safe boundary', { exact: true }).waitFor()
     assert.deepEqual(calls.find((call) => call.path === '/api/tasks/steer').body, { taskId: 'task-fixture', content: 'Use an accessible form' })
-    await page.getByRole('button', { name: 'Stop task', exact: true }).click()
-    await page.getByRole('textbox', { name: 'Continuation objective' }).waitFor()
-    await page.getByRole('textbox', { name: 'Continuation objective' }).fill('Inspect artifacts, then finish the form')
-    await page.getByRole('combobox', { name: 'Continuation budget' }).selectOption('extended')
-    await page.getByRole('button', { name: 'Continue task', exact: true }).click()
+    await controls.getByRole('button', { name: 'Stop task', exact: true }).click()
+    await controls.getByRole('textbox', { name: 'Continuation objective' }).waitFor()
+    await controls.getByRole('textbox', { name: 'Continuation objective' }).fill('Inspect artifacts, then finish the form')
+    await controls.getByRole('combobox', { name: 'Continuation budget' }).selectOption('extended')
+    await controls.getByRole('button', { name: 'Continue task', exact: true }).click()
     await page.getByText('Explicit continuation queued; previous effects will not be replayed automatically', { exact: true }).waitFor()
     // A newly queued continuation is a different task. Stay on the reviewed
     // task until the operator explicitly chooses that new task's room.
-    assert.equal(await page.getByRole('combobox', { name: 'Task to control' }).inputValue(), 'task-fixture')
-    await page.getByRole('combobox', { name: 'Task to control' }).selectOption('continuation-fixture')
-    await page.getByRole('textbox', { name: 'Task guidance' }).waitFor()
+    assert.equal(await controls.getByRole('combobox', { name: 'Task to control' }).inputValue(), 'task-fixture')
+    await controls.getByRole('combobox', { name: 'Task to control' }).selectOption('continuation-fixture')
+    await controls.getByRole('textbox', { name: 'Task guidance' }).waitFor()
     const continued = calls.find((call) => call.path === '/api/tasks/continue')
     assert.deepEqual(continued.body.budget, { maxTurns: 64, maxToolCalls: 48 })
     await page.getByRole('button', { name: 'Load older tasks', exact: true }).click()

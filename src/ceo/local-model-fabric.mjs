@@ -20,7 +20,10 @@ import {
   createStabilityImageGenerator,
 } from './bedrock-media-provider.mjs'
 import { createTaskAwareModelRouter } from './task-aware-model-router.mjs'
+import { markInferenceOnlyLeaf } from './inference-proof.mjs'
 import { createS3MediaArtifactResolver } from './s3-media-artifact.mjs'
+import { validateModelRouter } from './model-router.mjs'
+import { createTrustedModelCallNotSentError, isTrustedModelCallNotSentError } from './model-call-errors.mjs'
 
 const execFile = promisify(execFileCallback)
 
@@ -95,6 +98,14 @@ function openAiCompatibleSettings(config, env) {
         id: model.id,
         name: model.name,
         capabilities: [...new Set(model.capabilities)],
+        ...(Array.isArray(model.inputModalities) ? { inputModalities: [...new Set(model.inputModalities)] } : {}),
+        ...(Array.isArray(model.outputModalities) ? { outputModalities: [...new Set(model.outputModalities)] } : {}),
+        ...(Number.isSafeInteger(model.contextCapacityTokens) && model.contextCapacityTokens > 0
+          ? { contextCapacityTokens: model.contextCapacityTokens } : {}),
+        ...(typeof model.privacy === 'string' ? { privacy: model.privacy } : {}),
+        ...(Number.isFinite(model.priority) ? { priority: model.priority } : {}),
+        ...(model.priorityByPreset && typeof model.priorityByPreset === 'object' && !Array.isArray(model.priorityByPreset)
+          ? { priorityByPreset: structuredClone(model.priorityByPreset) } : {}),
       }
     })
     if (new Set(models.map((model) => model.id)).size !== models.length) {
@@ -150,9 +161,14 @@ function buildMantleCatalog({ models, settings, configured, accessState }) {
       id,
       name: metadata?.name ?? displayNameForMantleId(id),
       provider: metadata?.provider ?? providerId.toUpperCase(),
-      inputModalities: [...(metadata?.inputModalities ?? ['TEXT'])],
-      outputModalities: [...(metadata?.outputModalities ?? ['TEXT'])],
-      capabilities: [...(metadata?.capabilities ?? ['conversation'])],
+      // Mantle discovery currently returns model IDs only. Do not turn an
+      // unknown model into an invented text/conversation route: empty arrays
+      // are an explicit bounded representation of unavailable metadata and
+      // keep both routing and Ask eligibility fail-closed.
+      inputModalities: [...(metadata?.inputModalities ?? [])],
+      outputModalities: [...(metadata?.outputModalities ?? [])],
+      capabilities: [...(metadata?.capabilities ?? [])],
+      ...(!metadata ? { metadataStatus: 'unknown' } : {}),
       ...(Array.isArray(metadata?.strengths) ? { strengths: [...metadata.strengths] } : {}),
       inferenceType: 'MANTLE_PROJECT',
       endpoint: 'bedrock-mantle',
@@ -182,6 +198,21 @@ function modelCapabilities(model) {
   if (outputs.has('EMBEDDING')) capabilities.push('embedding')
   if (outputs.has('SPEECH')) capabilities.push('speech')
   return capabilities.length > 0 ? capabilities : ['unknown']
+}
+
+function declaredRouteMetadata(model) {
+  return {
+    ...(Array.isArray(model?.inputModalities) ? { inputModalities: [...new Set(model.inputModalities)] } : {}),
+    ...(Array.isArray(model?.outputModalities) ? { outputModalities: [...new Set(model.outputModalities)] } : {}),
+    ...(Number.isSafeInteger(model?.contextCapacityTokens) && model.contextCapacityTokens > 0
+      ? { contextCapacityTokens: model.contextCapacityTokens }
+      : {}),
+    ...(typeof model?.privacy === 'string' ? { privacy: model.privacy } : {}),
+  }
+}
+
+function routeScopeMetadata(scope) {
+  return typeof scope?.agentId === 'string' ? { agentId: scope.agentId } : {}
 }
 
 function buildBedrockCatalog({ models, profiles, configuredRoutes, mediaAdapters = new Set() }) {
@@ -232,6 +263,34 @@ function availabilityFailure(code) {
   const error = new Error(code)
   error.code = code
   return error
+}
+
+function guardedRouter(router, routeGuard) {
+  if (typeof routeGuard !== 'function') return router
+  return validateModelRouter(Object.freeze({
+    routerId: router.routerId,
+    nativeExecution: router.nativeExecution === true,
+    descriptor: router.descriptor,
+    async route(...args) {
+      try {
+        await routeGuard(router.descriptor)
+      } catch (error) {
+        if (isTrustedModelCallNotSentError(error)) throw error
+        const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,127}$/.test(error.code)
+          ? error.code
+          : 'MODEL_ROUTE_GUARD_DENIED'
+        throw createTrustedModelCallNotSentError('model route denied before dispatch', {
+          code,
+          reason: code,
+        })
+      }
+      return router.route(...args)
+    },
+  }))
+}
+
+function inferenceOnlyRouter(router, routeGuard) {
+  return markInferenceOnlyLeaf(guardedRouter(router, routeGuard))
 }
 
 function publicMediaArtifact(artifact, { includeArtifactUrl = true } = {}) {
@@ -310,6 +369,9 @@ export class LocalModelFabricRegistry {
     openAiCompatibleFetch = globalThis.fetch,
     env = process.env,
     now = () => Date.now(),
+    routeGuard = null,
+    eligibility = null,
+    evidence = null,
   } = {}) {
     const normalizedConfig = validateConfig(config)
     if (!audit || typeof audit.append !== 'function' || !boundedString(workingDirectory, 4096)) {
@@ -418,6 +480,9 @@ export class LocalModelFabricRegistry {
       openAiCompatibleFetch,
       env,
       now,
+      routeGuard,
+      eligibility,
+      evidence,
     })
   }
 
@@ -451,8 +516,15 @@ export class LocalModelFabricRegistry {
     openAiCompatibleFetch,
     env,
     now,
+    routeGuard,
+    eligibility,
+    evidence,
   }) {
     this.config = config
+    // Runtime work may pass an admission-bound agent/task scope as the
+    // additive second routerFor argument. Legacy test registries do not set
+    // this capability and retain their pre-existing fixed-router behavior.
+    this.supportsTaskRoutingScope = true
     this.audit = audit
     this.codexStatus = codexStatus
     this.antigravity = antigravity
@@ -472,6 +544,9 @@ export class LocalModelFabricRegistry {
     this.mantleAccessState = mantleAccessState
     this.openAiCompatibleProviders = new Map(openAiCompatibleProviders.map((provider) => [provider.id, provider]))
     this.openAiCompatibleFetch = openAiCompatibleFetch
+    this.routeGuard = routeGuard
+    this.eligibility = eligibility
+    this.evidence = evidence
     this.openAiCompatibleAccessState = new Map()
     this.now = now
     this.accessState = new Map()
@@ -502,17 +577,40 @@ export class LocalModelFabricRegistry {
     }
     const routes = []
     let codexRouter = null
+    const mantleModelById = new Map([
+      ...mantleModels,
+      // Local priority metadata is the trusted supplement for a discovered
+      // ID-only catalog entry; it must not be overwritten by `{ id }`.
+      ...mantleSettings.priorityModels,
+    ].map(model => [model.id, model]))
+    const bedrockModelByProfileId = new Map(bedrockProfiles.map(profile => {
+      const foundationId = profile.models.map(foundationModelId).find(id => bedrockModels.some(model => model.id === id))
+      return [profile.id, bedrockModels.find(model => model.id === foundationId) ?? null]
+    }))
     if (codexStatus?.configured === true) {
-      codexRouter = createCodexSubscriptionModelRouter({
+      codexRouter = guardedRouter(createCodexSubscriptionModelRouter({
         codex: codexClient,
         model: config.codex.model,
         workingDirectory,
         reasoningEffort: config.codex.reasoningEffort,
-      })
+      }), routeGuard)
       routes.push({
         id: 'codex-primary',
         router: codexRouter,
         capabilities: ['orchestration', 'coding', 'reasoning'],
+        inputModalities: ['TEXT'],
+        outputModalities: ['TEXT'],
+        providerId: 'codex',
+        model: config.codex.model,
+        nativeExecution: true,
+        authority: {
+          connectionEnabled: true,
+          agentAllowed: true,
+          executorAllowed: true,
+          requirementsSatisfied: true,
+          pinSatisfied: true,
+          reasons: [],
+        },
         costClass: 'subscription',
       })
     }
@@ -520,9 +618,24 @@ export class LocalModelFabricRegistry {
       const catalogIds = new Set(mantleModels.map(model => model.id))
       for (const route of mantleSettings.routes) {
         if (!catalogIds.has(route.model)) continue
+        const discoveredMetadata = mantleModelById.get(route.model)
+        const declaredOutputModalities = Array.isArray(route.outputModalities)
+          ? route.outputModalities
+          : discoveredMetadata?.outputModalities
+        const generationCapability = new Set(['image-generation', 'image-editing', 'video-generation', 'embedding', 'speech'])
+        // Mantle's current adapter is the text chat-completions transport.
+        // Generation-capable or modality-unknown models must be served by a
+        // dedicated media adapter, never silently sent to chat completions.
+        if (!Array.isArray(declaredOutputModalities) || !declaredOutputModalities.includes('TEXT')
+          || (Array.isArray(route.capabilities) && route.capabilities.some(capability => generationCapability.has(capability)))) continue
+        const metadata = {
+          ...declaredRouteMetadata(discoveredMetadata),
+          ...(Array.isArray(route.inputModalities) ? { inputModalities: [...route.inputModalities] } : {}),
+          ...(Array.isArray(route.outputModalities) ? { outputModalities: [...route.outputModalities] } : {}),
+        }
         routes.push({
           id: route.id,
-          router: createMantleModelRouter({
+          router: inferenceOnlyRouter(createMantleModelRouter({
             fetchImpl: mantleFetch,
             baseUrl: mantleSettings.baseUrl,
             region: config.region,
@@ -530,8 +643,21 @@ export class LocalModelFabricRegistry {
             signer: mantleSigner,
             project: mantleSettings.project,
             modelId: route.model,
-          }),
+          }), routeGuard),
           capabilities: route.capabilities,
+          ...metadata,
+          providerId: 'aws-bedrock-mantle',
+          model: route.model,
+          ...(Number.isFinite(route.priority) ? { priority: route.priority } : {}),
+          ...(route.priorityByPreset ? { priorityByPreset: route.priorityByPreset } : {}),
+          authority: {
+            connectionEnabled: true,
+            agentAllowed: true,
+            executorAllowed: true,
+            requirementsSatisfied: true,
+            pinSatisfied: true,
+            reasons: [],
+          },
           costClass: route.costClass,
         })
       }
@@ -540,24 +666,59 @@ export class LocalModelFabricRegistry {
     if (bedrockRuntimeClient) {
       for (const route of config.bedrockRoutes) {
         if (!profileIds.has(route.model)) continue
+        const metadata = {
+          ...declaredRouteMetadata(bedrockModelByProfileId.get(route.model)),
+          ...(Array.isArray(route.inputModalities) ? { inputModalities: [...route.inputModalities] } : {}),
+          ...(Array.isArray(route.outputModalities) ? { outputModalities: [...route.outputModalities] } : {}),
+        }
         routes.push({
           id: route.id,
-          router: createBedrockModelRouter({
+          router: inferenceOnlyRouter(createBedrockModelRouter({
             client: bedrockRuntimeClient,
             modelId: route.model,
             region: config.region,
             ...(bedrockCommandFactory ? { commandFactory: bedrockCommandFactory } : {}),
-          }),
+          }), routeGuard),
           capabilities: route.capabilities,
+          ...metadata,
+          providerId: 'aws-bedrock',
+          model: route.model,
+          ...(Number.isFinite(route.priority) ? { priority: route.priority } : {}),
+          ...(route.priorityByPreset ? { priorityByPreset: route.priorityByPreset } : {}),
+          authority: {
+            connectionEnabled: true,
+            agentAllowed: true,
+            executorAllowed: true,
+            requirementsSatisfied: true,
+            pinSatisfied: true,
+            reasons: [],
+          },
           costClass: route.costClass,
         })
       }
     }
     if (codexRouter) {
-      routes.push({ id: 'codex-bulk-fallback', router: codexRouter, capabilities: ['bulk'], costClass: 'subscription' })
-      routes.push({ id: 'codex-research-fallback', router: codexRouter, capabilities: ['research'], costClass: 'subscription' })
+      const codexFallback = {
+        inputModalities: ['TEXT'],
+        outputModalities: ['TEXT'],
+        providerId: 'codex',
+        model: config.codex.model,
+        nativeExecution: true,
+        authority: {
+          connectionEnabled: true,
+          agentAllowed: true,
+          executorAllowed: true,
+          requirementsSatisfied: true,
+          pinSatisfied: true,
+          reasons: [],
+        },
+        costClass: 'subscription',
+      }
+      routes.push({ id: 'codex-bulk-fallback', router: codexRouter, capabilities: ['bulk'], ...codexFallback })
+      routes.push({ id: 'codex-research-fallback', router: codexRouter, capabilities: ['research'], ...codexFallback })
     }
-    this.fabric = routes.length > 0 ? createTaskAwareModelRouter({ routes, audit, now }) : null
+    this.routeDescriptors = routes
+    this.fabric = this.#createFabric()
     this.activeRouter = this.fabric
     this.selection = this.fabric ? {
       providerId: 'chimera-auto',
@@ -582,6 +743,11 @@ export class LocalModelFabricRegistry {
       id: route.id,
       providerRouterId: route.router.routerId,
       capabilities: [...route.capabilities],
+      ...(route.providerId ? { providerId: route.providerId } : {}),
+      ...(route.model ? { model: route.model } : {}),
+      ...(route.inputModalities ? { inputModalities: [...route.inputModalities] } : {}),
+      ...(route.outputModalities ? { outputModalities: [...route.outputModalities] } : {}),
+      ...(route.nativeExecution ? { nativeExecution: true } : {}),
       costClass: route.costClass,
     }))
   }
@@ -602,11 +768,11 @@ export class LocalModelFabricRegistry {
       configured: boundedString(provider.apiKey, 16_384),
       authentication: boundedString(provider.apiKey, 16_384) ? 'API key' : null,
       connectionStatus: boundedString(provider.apiKey, 16_384) ? 'connected' : 'authentication-required',
-      models: provider.models.map((model) => ({
-        ...model,
-        provider: provider.name,
-        inputModalities: ['TEXT'],
-        outputModalities: ['TEXT'],
+          models: provider.models.map((model) => ({
+            ...model,
+            provider: provider.name,
+            ...(Array.isArray(model.inputModalities) ? { inputModalities: [...model.inputModalities] } : {}),
+            ...(Array.isArray(model.outputModalities) ? { outputModalities: [...model.outputModalities] } : {}),
         availability: boundedString(provider.apiKey, 16_384) ? 'authenticated' : 'access-required',
         ...(this.openAiCompatibleAccessState.has(`${provider.id}:${model.id}`)
           ? this.openAiCompatibleAccessState.get(`${provider.id}:${model.id}`)
@@ -694,13 +860,295 @@ export class LocalModelFabricRegistry {
     return this.activeRouter
   }
 
-  async routerFor({ mode = 'auto', providerId, model } = {}) {
+  async routerFor({ mode = 'auto', providerId, model } = {}, scope = null) {
     if (mode === 'auto') {
+      // Auto means the registry's current operator-selected route when one
+      // exists. Rebuild that explicit route with the captured scope so the
+      // selection remains task/agent-bound; never fall back to an unscoped
+      // manual router from runtime work. An admitted Auto sentinel must keep
+      // the fabric route even if the operator selects a manual route later.
+      const captured = scope?.capturedSelection
+      const capturedAuto = captured?.providerId === 'chimera-auto' && captured?.model === 'auto'
+      const capturedManual = captured
+        && typeof captured.providerId === 'string'
+        && typeof captured.model === 'string'
+        && !capturedAuto
+      if (scope && capturedManual) {
+        return (await this.#resolveExplicitRouter({
+          providerId: captured.providerId,
+          model: captured.model,
+          scope,
+        })).router
+      }
+      if (scope && capturedAuto) return this.#createFabric(scope)
+      if (scope && this.selection && this.selection.providerId !== 'chimera-auto' && this.selection.model !== 'auto') {
+        return (await this.#resolveExplicitRouter({
+          providerId: this.selection.providerId,
+          model: this.selection.model,
+          scope,
+        })).router
+      }
       if (!this.fabric) throw availabilityFailure('NO_MODEL_PROVIDER_CONFIGURED')
-      return this.fabric
+      return scope ? this.#createFabric(scope) : this.fabric
     }
     if (!['preferred', 'pinned'].includes(mode)) throw availabilityFailure('MODEL_SELECTION_INVALID')
-    return (await this.#resolveExplicitRouter({ providerId, model })).router
+    return (await this.#resolveExplicitRouter({ providerId, model, scope })).router
+  }
+
+  #scopedEligibility(scope = null) {
+    return typeof this.eligibility === 'function'
+      ? (route, input) => this.eligibility(route, { ...input, scope })
+      : null
+  }
+
+  #createFabric(scope = null) {
+    return this.routeDescriptors.length > 0
+      ? createTaskAwareModelRouter({
+          routes: this.routeDescriptors,
+          audit: this.audit,
+          now: this.now,
+          routerId: 'model-fabric:auto',
+          model: 'auto',
+          eligibility: this.#scopedEligibility(scope),
+          evidence: this.evidence,
+          scope,
+        })
+      : null
+  }
+
+  async routerForAsk(preference = {}) {
+    const mode = preference?.mode ?? 'auto'
+    if (!['auto', 'preferred', 'pinned'].includes(mode)) throw availabilityFailure('MODEL_SELECTION_INVALID')
+    if (mode === 'auto') return this.#autoAskRouter()
+    try {
+      return this.#askLeafRouter({ providerId: preference.providerId, model: preference.model })
+    } catch (error) {
+      if (mode !== 'preferred') throw error
+      this.audit.append({
+        kind: 'model.ask.fallback',
+        providerId: preference.providerId,
+        model: preference.model,
+        reason: typeof error?.code === 'string' ? error.code : 'ASK_EXECUTOR_NOT_PURE',
+        at: new Date(this.now()).toISOString(),
+      })
+      return this.#autoAskRouter()
+    }
+  }
+
+  /**
+   * Describe the exact leaf that routerForAsk() would use without invoking a
+   * provider.  Readiness fingerprints must bind to this route rather than the
+   * global task-model selection: Ask Auto has its own candidate order and
+   * Preferred may fall back to that same Auto route.
+   */
+  describeAskSelection(preference = {}) {
+    const mode = preference?.mode ?? 'auto'
+    if (!['auto', 'preferred', 'pinned'].includes(mode)) throw availabilityFailure('MODEL_SELECTION_INVALID')
+    const candidates = this.#askCandidates()
+    const requested = mode === 'auto' ? null : {
+      providerId: preference?.providerId ?? null,
+      model: preference?.model ?? null,
+    }
+    const explicitEligible = requested?.providerId && requested?.model
+      ? this.#askCandidateAvailable(requested)
+      : false
+    const selected = mode === 'auto'
+      ? candidates[0] ?? null
+      : explicitEligible
+        ? requested
+        : mode === 'preferred'
+          ? candidates[0] ?? null
+          : null
+    const fallback = mode === 'preferred' && !explicitEligible
+    return {
+      schema: 'chimera.model-ask-selection.v1',
+      mode,
+      ...(requested ? { requestedProviderId: requested.providerId, requestedModel: requested.model } : {}),
+      providerId: selected?.providerId ?? (mode === 'auto' ? 'chimera-auto' : requested?.providerId ?? null),
+      model: selected?.model ?? (mode === 'auto' ? 'auto' : requested?.model ?? null),
+      eligible: Boolean(selected),
+      availability: selected ? 'available' : 'unavailable',
+      execution: selected ? 'inference-only' : 'unknown',
+      ...(fallback ? { fallback: true } : {}),
+      ...(!selected && mode === 'pinned' ? { reason: 'ASK_EXECUTOR_NOT_PURE' } : {}),
+    }
+  }
+
+  #autoAskRouter() {
+    const selected = this.#askCandidates()[0]
+    if (!selected) throw availabilityFailure('ASK_EXECUTOR_NOT_PURE')
+    return this.#askLeafRouter(selected)
+  }
+
+  #askCandidates() {
+    const candidates = []
+    for (const provider of this.openAiCompatibleProviders.values()) {
+      if (!boundedString(provider.apiKey, 16_384)) continue
+      for (const model of provider.models.filter((entry) => entry.capabilities.includes('conversation'))) {
+        candidates.push({ providerId: provider.id, model: model.id })
+      }
+    }
+    if (hasMantleAuthentication(this.mantleApiKey, this.mantleSigner) && !this.mantleError) {
+      for (const model of this.mantleCatalog.filter((entry) => entry.capabilities.includes('conversation'))) {
+        candidates.push({ providerId: 'aws-bedrock-mantle', model: model.id })
+      }
+    }
+    if (this.bedrockRuntimeClient) {
+      for (const model of this.bedrockCatalog.filter((entry) => entry.capabilities.includes('conversation'))) {
+        candidates.push({ providerId: 'aws-bedrock', model: model.id })
+      }
+    }
+    return candidates
+  }
+
+  #askCandidateAvailable({ providerId, model } = {}) {
+    if (!boundedString(providerId, 256) || !boundedString(model, 512)) return false
+    if (providerId === 'codex' || providerId === 'antigravity' || providerId === 'chimera-auto') return false
+    const compatibleProvider = this.openAiCompatibleProviders.get(providerId)
+    if (compatibleProvider) {
+      return boundedString(compatibleProvider.apiKey, 16_384)
+        && compatibleProvider.models.some((entry) => entry.id === model && entry.capabilities.includes('conversation'))
+    }
+    if (providerId === 'aws-bedrock-mantle') {
+      return hasMantleAuthentication(this.mantleApiKey, this.mantleSigner)
+        && !this.mantleError
+        && this.mantleCatalog.some((entry) => entry.id === model && entry.capabilities.includes('conversation'))
+    }
+    if (providerId === 'aws-bedrock') {
+      return Boolean(this.bedrockRuntimeClient)
+        && this.bedrockCatalog.some((entry) => entry.id === model && entry.capabilities.includes('conversation'))
+    }
+    return false
+  }
+
+  #askLeafRouter({ providerId, model } = {}) {
+    if (!boundedString(providerId, 256) || !boundedString(model, 512)) throw availabilityFailure('MODEL_SELECTION_INVALID')
+    if (providerId === 'codex' || providerId === 'antigravity' || providerId === 'chimera-auto') {
+      throw availabilityFailure('ASK_EXECUTOR_NOT_PURE')
+    }
+    const compatibleProvider = this.openAiCompatibleProviders.get(providerId)
+    if (compatibleProvider) {
+      const selected = compatibleProvider.models.find((entry) => entry.id === model)
+      if (!selected) throw availabilityFailure('MODEL_NOT_IN_PROVIDER_CATALOG')
+      if (!boundedString(compatibleProvider.apiKey, 16_384)) throw availabilityFailure('MODEL_PROVIDER_AUTH_REQUIRED')
+      const router = inferenceOnlyRouter(createOpenAiCompatibleModelRouter({
+        providerId,
+        model,
+        baseUrl: compatibleProvider.baseUrl,
+        apiKey: compatibleProvider.apiKey,
+        fetchImpl: this.openAiCompatibleFetch,
+      }), this.routeGuard)
+      if (router.descriptor?.execution !== 'inference-only') throw availabilityFailure('ASK_EXECUTOR_NOT_PURE')
+      return router
+    }
+    if (providerId === 'aws-bedrock-mantle') {
+      const selected = this.mantleCatalog.find((entry) => entry.id === model)
+      if (!selected) throw availabilityFailure('MODEL_NOT_IN_MANTLE_CATALOG')
+      if (!selected.capabilities.includes('conversation')) throw availabilityFailure('ASK_EXECUTOR_NOT_PURE')
+      if (!hasMantleAuthentication(this.mantleApiKey, this.mantleSigner)) throw availabilityFailure('MANTLE_AUTH_REQUIRED')
+      if (this.mantleError) throw availabilityFailure(this.mantleError)
+      const router = inferenceOnlyRouter(createMantleModelRouter({
+        fetchImpl: this.mantleFetch,
+        baseUrl: this.mantleSettings.baseUrl,
+        region: this.config.region,
+        apiKey: this.mantleApiKey,
+        signer: this.mantleSigner,
+        project: this.mantleSettings.project,
+        modelId: selected.id,
+      }), this.routeGuard)
+      if (router.descriptor?.execution !== 'inference-only') throw availabilityFailure('ASK_EXECUTOR_NOT_PURE')
+      return router
+    }
+    if (providerId === 'aws-bedrock') {
+      const selected = this.bedrockCatalog.find((entry) => entry.id === model)
+      if (!selected) throw availabilityFailure('MODEL_NOT_IN_BEDROCK_CATALOG')
+      if (!selected.capabilities.includes('conversation')) throw availabilityFailure('ASK_EXECUTOR_NOT_PURE')
+      if (!this.bedrockRuntimeClient) throw availabilityFailure('BEDROCK_RUNTIME_CLIENT_UNAVAILABLE')
+      const router = inferenceOnlyRouter(createBedrockModelRouter({
+        client: this.bedrockRuntimeClient,
+        modelId: selected.id,
+        region: this.config.region,
+        ...(this.bedrockCommandFactory ? { commandFactory: this.bedrockCommandFactory } : {}),
+      }), this.routeGuard)
+      if (router.descriptor?.execution !== 'inference-only') throw availabilityFailure('ASK_EXECUTOR_NOT_PURE')
+      return router
+    }
+    throw availabilityFailure('MODEL_SELECTION_INVALID')
+  }
+
+  describeSelection({ mode = 'auto', providerId, model } = {}) {
+    const base = { schema: 'chimera.model-selection-description.v1', mode, inferenceCalled: false, verification: 'not-run' }
+    if (mode === 'auto') {
+      return {
+        ...base,
+        providerId: 'chimera-auto',
+        model: 'auto',
+        modelName: 'Best model for task',
+        eligible: Boolean(this.fabric),
+        availability: this.fabric ? 'available' : 'unavailable',
+        ...(this.fabric ? {} : { reason: 'NO_MODEL_PROVIDER_CONFIGURED' }),
+      }
+    }
+    if (!['preferred', 'pinned'].includes(mode)) throw availabilityFailure('MODEL_SELECTION_INVALID')
+    const compatibleProvider = this.openAiCompatibleProviders.get(providerId)
+    if (providerId === 'antigravity') {
+      const state = this.antigravity?.state()
+      const selected = state?.models?.find(entry => entry.id === model)
+      return {
+        ...base, providerId, model, modelName: selected?.name ?? null,
+        eligible: Boolean(state?.configured && selected),
+        availability: state?.configured && selected ? 'available' : 'unavailable',
+        ...(state?.configured && selected ? {} : { reason: 'ANTIGRAVITY_MODEL_UNAVAILABLE' }),
+      }
+    }
+    if (providerId === 'codex') {
+      const selected = model === this.config.codex.model && this.codexRouter
+      return {
+        ...base, providerId, model, modelName: model === this.config.codex.model ? model : null,
+        eligible: Boolean(selected), availability: selected ? 'available' : 'unavailable',
+        ...(selected ? {} : { reason: 'CODEX_MODEL_UNAVAILABLE' }),
+      }
+    }
+    if (compatibleProvider) {
+      const selected = compatibleProvider.models.find(entry => entry.id === model)
+      const eligible = Boolean(selected && boundedString(compatibleProvider.apiKey, 16_384))
+      const verified = this.openAiCompatibleAccessState.get(`${providerId}:${model}`)?.availability === 'verified-manual'
+      return {
+        ...base, providerId, model, modelName: selected?.name ?? null,
+        eligible,
+        availability: !selected ? 'unavailable' : !eligible ? 'access-required' : verified ? 'verified-manual' : 'catalog-only',
+        ...(verified ? { verification: 'verified' } : {}),
+        ...(!selected || eligible && !verified ? { reason: !selected ? 'MODEL_NOT_IN_PROVIDER_CATALOG' : eligible ? 'MODEL_ACCESS_CHECK_REQUIRED' : 'MODEL_PROVIDER_AUTH_REQUIRED' } : {}),
+      }
+    }
+    if (providerId === 'aws-bedrock-mantle') {
+      const selected = this.mantleCatalog.find(entry => entry.id === model)
+      const eligible = Boolean(selected && hasMantleAuthentication(this.mantleApiKey, this.mantleSigner) && !this.mantleError)
+      const verified = this.mantleAccessState.get(model)?.availability === 'verified-manual'
+      return {
+        ...base, providerId, model, modelName: selected?.name ?? null,
+        eligible,
+        availability: !selected ? 'unavailable' : !eligible ? 'access-required' : verified ? 'verified-manual' : 'catalog-only',
+        ...(verified ? { verification: 'verified' } : {}),
+        ...(!selected || eligible && !verified ? { reason: !selected ? 'MODEL_NOT_IN_MANTLE_CATALOG' : eligible ? 'MODEL_ACCESS_CHECK_REQUIRED' : (this.mantleError ?? 'MANTLE_AUTH_REQUIRED') } : {}),
+      }
+    }
+    if (providerId === 'aws-bedrock') {
+      const selected = this.bedrockCatalog.find(entry => entry.id === model)
+      const eligible = Boolean(selected?.capabilities.includes('conversation') && this.bedrockRuntimeClient)
+      const verified = selected?.availability === 'verified-route'
+        || this.accessState.get(model)?.availability === 'verified-manual'
+      return {
+        ...base, providerId, model, modelName: selected?.name ?? null,
+        eligible,
+        availability: !selected ? 'unavailable' : !selected.capabilities.includes('conversation') ? 'unavailable' : !eligible ? 'unavailable' : verified ? 'verified-route' : 'catalog-only',
+        ...(verified ? { verification: selected?.availability === 'verified-route' ? 'configured-route' : 'verified' } : {}),
+        ...(!selected || !selected.capabilities.includes('conversation') || !eligible || eligible && !verified
+          ? { reason: !selected ? 'MODEL_NOT_IN_BEDROCK_CATALOG' : !selected.capabilities.includes('conversation') ? 'MODEL_REQUIRES_SPECIALIST_ADAPTER' : !eligible ? 'BEDROCK_RUNTIME_CLIENT_UNAVAILABLE' : 'MODEL_ACCESS_CHECK_REQUIRED' }
+          : {}),
+      }
+    }
+    throw availabilityFailure('MODEL_SELECTION_INVALID')
   }
 
   async select({ providerId, model } = {}) {
@@ -721,16 +1169,23 @@ export class LocalModelFabricRegistry {
     return this.state()
   }
 
-  async #resolveExplicitRouter({ providerId, model }) {
+  async #resolveExplicitRouter({ providerId, model, scope = null }) {
     if (providerId === 'antigravity') {
       const state = this.antigravity?.state()
       const selected = state?.models.find(entry => entry.id === model)
       if (!state?.configured || !selected) throw availabilityFailure('ANTIGRAVITY_MODEL_UNAVAILABLE')
+      const metadata = declaredRouteMetadata(selected)
       return {
         router: createTaskAwareModelRouter({
-          routes: [{ id: 'antigravity-manual', router: this.antigravity.router(model),
-            capabilities: ['orchestration', 'coding', 'reasoning', 'bulk', 'research'], costClass: 'subscription' }],
+          routes: [{ id: 'antigravity-manual', router: guardedRouter(this.antigravity.router(model), this.routeGuard),
+            capabilities: Array.isArray(selected.capabilities) ? selected.capabilities : [],
+            ...metadata,
+            providerId: 'antigravity', model, nativeExecution: true,
+            ...routeScopeMetadata(scope),
+            authority: { connectionEnabled: true, agentAllowed: true, executorAllowed: true, requirementsSatisfied: true, pinSatisfied: true, reasons: [] },
+            costClass: 'subscription' }],
           audit: this.audit, now: this.now, routerId: 'model-fabric:manual:antigravity', model,
+          eligibility: this.#scopedEligibility(scope), evidence: this.evidence, scope,
         }),
         selection: { providerId, providerName: 'Antigravity', model, modelName: selected.name },
       }
@@ -741,12 +1196,17 @@ export class LocalModelFabricRegistry {
           id: 'codex-manual',
           router: this.codexRouter,
           capabilities: ['orchestration', 'coding', 'reasoning', 'bulk', 'research'],
+          inputModalities: ['TEXT'], outputModalities: ['TEXT'],
+          providerId: 'codex', model, nativeExecution: true,
+          ...routeScopeMetadata(scope),
+          authority: { connectionEnabled: true, agentAllowed: true, executorAllowed: true, requirementsSatisfied: true, pinSatisfied: true, reasons: [] },
           costClass: 'subscription',
         }],
         audit: this.audit,
         now: this.now,
         routerId: 'model-fabric:manual:codex',
         model,
+        eligibility: this.#scopedEligibility(scope), evidence: this.evidence, scope,
       })
       return {
         router,
@@ -758,10 +1218,6 @@ export class LocalModelFabricRegistry {
       const selected = compatibleProvider.models.find((entry) => entry.id === model)
       if (!selected) throw availabilityFailure('MODEL_NOT_IN_PROVIDER_CATALOG')
       if (!boundedString(compatibleProvider.apiKey, 16_384)) throw availabilityFailure('MODEL_PROVIDER_AUTH_REQUIRED')
-      const checked = await this.check({ providerId, model })
-      if (checked.availability !== 'verified-manual') {
-        throw availabilityFailure(checked.error ?? 'MODEL_PROVIDER_NOT_AVAILABLE')
-      }
       const compatibleRouter = createOpenAiCompatibleModelRouter({
         providerId,
         model,
@@ -773,14 +1229,19 @@ export class LocalModelFabricRegistry {
         router: createTaskAwareModelRouter({
           routes: [{
             id: `manual-${providerId}-${model}`,
-            router: compatibleRouter,
-            capabilities: ['orchestration', 'coding', 'reasoning', 'bulk', 'research'],
+            router: inferenceOnlyRouter(compatibleRouter, this.routeGuard),
+            capabilities: selected.capabilities,
+            ...declaredRouteMetadata(selected),
+            providerId, model,
+            ...routeScopeMetadata(scope),
+            authority: { connectionEnabled: true, agentAllowed: true, executorAllowed: true, requirementsSatisfied: true, pinSatisfied: true, reasons: [] },
             costClass: 'manual',
           }],
           audit: this.audit,
           now: this.now,
           routerId: `model-fabric:manual:${providerId}`,
           model,
+          eligibility: this.#scopedEligibility(scope), evidence: this.evidence, scope,
         }),
         selection: { providerId, providerName: compatibleProvider.name, model, modelName: selected.name },
       }
@@ -788,11 +1249,11 @@ export class LocalModelFabricRegistry {
     if (providerId === 'aws-bedrock-mantle') {
       const selected = this.mantleCatalog.find((entry) => entry.id === model)
       if (!selected) throw availabilityFailure('MODEL_NOT_IN_MANTLE_CATALOG')
-      if (!hasMantleAuthentication(this.mantleApiKey, this.mantleSigner)) throw availabilityFailure('MANTLE_AUTH_REQUIRED')
-      const checked = await this.check({ providerId, model })
-      if (checked.availability !== 'verified-manual') {
-        throw availabilityFailure(checked.error ?? 'MANTLE_MODEL_NOT_AVAILABLE')
+      if (!selected.capabilities.includes('conversation') || !selected.outputModalities.includes('TEXT')) {
+        throw availabilityFailure('MODEL_REQUIRES_SPECIALIST_ADAPTER')
       }
+      if (!hasMantleAuthentication(this.mantleApiKey, this.mantleSigner)) throw availabilityFailure('MANTLE_AUTH_REQUIRED')
+      if (this.mantleError) throw availabilityFailure(this.mantleError)
       const mantleRouter = createMantleModelRouter({
         fetchImpl: this.mantleFetch,
         baseUrl: this.mantleSettings.baseUrl,
@@ -805,14 +1266,19 @@ export class LocalModelFabricRegistry {
       const router = createTaskAwareModelRouter({
         routes: [{
           id: `manual-mantle-${selected.id}`,
-          router: mantleRouter,
-          capabilities: ['orchestration', 'coding', 'reasoning', 'bulk', 'research'],
+          router: inferenceOnlyRouter(mantleRouter, this.routeGuard),
+          capabilities: selected.capabilities,
+          ...declaredRouteMetadata(selected),
+          providerId: 'aws-bedrock-mantle', model: selected.id,
+          ...routeScopeMetadata(scope),
+          authority: { connectionEnabled: true, agentAllowed: true, executorAllowed: true, requirementsSatisfied: true, pinSatisfied: true, reasons: [] },
           costClass: 'manual',
         }],
         audit: this.audit,
         now: this.now,
         routerId: 'model-fabric:manual:bedrock-mantle',
         model: selected.id,
+        eligibility: this.#scopedEligibility(scope), evidence: this.evidence, scope,
       })
       return {
         router,
@@ -830,28 +1296,30 @@ export class LocalModelFabricRegistry {
     if (!selected.capabilities.includes('conversation')) {
       throw availabilityFailure('MODEL_REQUIRES_SPECIALIST_ADAPTER')
     }
-    const checked = await this.check({ providerId, model })
-    if (checked.availability !== 'verified-manual') {
-      throw availabilityFailure(checked.error ?? 'BEDROCK_MODEL_NOT_AVAILABLE')
-    }
+    if (!this.bedrockRuntimeClient) throw availabilityFailure('BEDROCK_RUNTIME_CLIENT_UNAVAILABLE')
     const bedrockRouter = createBedrockModelRouter({
       client: this.bedrockRuntimeClient,
       modelId: selected.id,
       region: this.config.region,
       ...(this.bedrockCommandFactory ? { commandFactory: this.bedrockCommandFactory } : {}),
     })
-    const router = createTaskAwareModelRouter({
-      routes: [{
-        id: `manual-${selected.id}`,
-        router: bedrockRouter,
-        capabilities: ['orchestration', 'coding', 'reasoning', 'bulk', 'research'],
-        costClass: 'manual',
-      }],
+      const router = createTaskAwareModelRouter({
+        routes: [{
+          id: `manual-${selected.id}`,
+          router: inferenceOnlyRouter(bedrockRouter, this.routeGuard),
+          capabilities: selected.capabilities,
+          ...declaredRouteMetadata(selected),
+          providerId: 'aws-bedrock', model: selected.id,
+          ...routeScopeMetadata(scope),
+          authority: { connectionEnabled: true, agentAllowed: true, executorAllowed: true, requirementsSatisfied: true, pinSatisfied: true, reasons: [] },
+          costClass: 'manual',
+        }],
       audit: this.audit,
       now: this.now,
-      routerId: 'model-fabric:manual:bedrock',
-      model: selected.id,
-    })
+        routerId: 'model-fabric:manual:bedrock',
+        model: selected.id,
+        eligibility: this.#scopedEligibility(scope), evidence: this.evidence, scope,
+      })
     return {
       router,
       selection: {

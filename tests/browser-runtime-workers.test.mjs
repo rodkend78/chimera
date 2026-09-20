@@ -3,6 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { MemoryAuditLog } from '../src/audit-log.mjs'
+import { WorkerArtifactStore } from '../src/agents/worker-artifact-store.mjs'
 import { ChimeraBrowserRuntime } from '../src/browser/runtime.mjs'
 import { createDeterministicModelRouter } from '../src/ceo/model-router.mjs'
 
@@ -14,10 +16,14 @@ function browserExecutor() {
 test('browser runtime exposes safe worker state and delegates the worker API', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'chimera-runtime-workers-'))
   const calls = []
+  const artifacts = await WorkerArtifactStore.open({ rootDir: join(directory, 'artifacts'), audit: new MemoryAuditLog() })
   const workerRuntimeManager = {
-    state: () => ({ schema: 'chimera.worker-runtime.v1', sessions: [], artifacts: [] }),
+    artifacts,
+    state: () => ({ schema: 'chimera.worker-runtime.v1', sessions: [], artifacts: artifacts.list() }),
     executors: () => ({
-      mcp__chimera_worker__code: async () => ({ ok: true }),
+      mcp__chimera_worker__code: async (_args, context) => context?.taskScoped
+        ? { status: 'completed', artifact: await artifacts.save({ workerSessionId: context.workerSessionId, agentId: context.agentId, name: 'runtime.txt', mimeType: 'text/plain', content: 'runtime artifact' }) }
+        : { ok: true },
       mcp__chimera_worker__computer: async () => ({ ok: true }),
     }),
     async start(input) { calls.push(['start', input]); return { workerSessionId: 'worker-1' } },
@@ -49,6 +55,15 @@ test('browser runtime exposes safe worker state and delegates the worker API', a
   try {
     await runtime.start()
     assert.equal((await runtime.state()).workers.schema, 'chimera.worker-runtime.v1')
+    await runtime.tasks.submit({ taskId: 'runtime-artifact-task', objective: 'Record a materialized worker artifact.', model: null })
+    const artifactResult = await runtime.workerToolExecutors.mcp__chimera_worker__code(
+      { operation: 'export-files' },
+      { taskScoped: true, taskId: 'runtime-artifact-task', agentId: 'researcher', workerSessionId: 'worker-1' },
+    )
+    assert.equal(artifactResult.status, 'completed')
+    assert.equal(typeof artifactResult.artifact.artifactId, 'string')
+    assert.equal(runtime.tasks.listEvidence('runtime-artifact-task').some(receipt => receipt.kind === 'artifact'), true)
+    assert.equal(runtime.taskWorkspace('runtime-artifact-task').evidence.workProduced.state, 'observed')
     await runtime.startWorker({ agentId: 'researcher', kind: 'code', ttlSeconds: 900 })
     await runtime.stopWorker({ workerSessionId: 'worker-1' })
     await runtime.takeWorkerControl({ workerSessionId: 'worker-1' })

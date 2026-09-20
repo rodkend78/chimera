@@ -8,11 +8,16 @@ const OPEN_LEDGER_OWNERS = new Map()
 const AGENT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
 const ROLES = new Set(['human', 'rj', 'agent'])
 const STATUSES = new Set(['sent', 'completed', 'failed'])
-const KINDS = new Set(['message', 'task_handoff', 'structured_result', 'tool_request', 'tool_result', 'status'])
+const KINDS = new Set(['message', 'task_handoff', 'structured_result', 'tool_request', 'tool_result', 'status', 'question', 'answer'])
 const VERIFICATIONS = new Set(['human', 'verified', 'derived', 'legacy'])
+const FAILURE_CODE = /^[A-Z][A-Z0-9_]{2,127}$/
 
 function boundedString(value, maximum = 16_384) {
   return typeof value === 'string' && value.length > 0 && value.length <= maximum
+}
+
+function withinUtf8Bytes(value, maximum) {
+  return typeof value === 'string' && value.length > 0 && Buffer.byteLength(value, 'utf8') <= maximum
 }
 
 function agentId(value) {
@@ -67,8 +72,20 @@ function normalizedMessage(input, now) {
     || (input.taskId !== undefined && !boundedString(input.taskId, 256))
     || (input.replyTo !== undefined && !boundedString(input.replyTo, 256))
     || (input.status !== undefined && !STATUSES.has(input.status))
+    || (input.mode !== undefined && input.mode !== 'ask')
+    || (input.requestId !== undefined && !boundedString(input.requestId, 256))
+    || (input.requestHash !== undefined && !/^[0-9a-f]{64}$/.test(input.requestHash))
+    || (input.failureCode !== undefined && !FAILURE_CODE.test(input.failureCode))
     || (input.createdAt !== undefined && (!boundedString(input.createdAt, 64) || Number.isNaN(Date.parse(input.createdAt))))) {
     throw Object.assign(new TypeError('CONVERSATION_MESSAGE_INVALID'), { code: 'CONVERSATION_MESSAGE_INVALID' })
+  }
+  if (input.kind === 'question' || input.kind === 'answer') {
+    if (input.mode !== 'ask' || !input.requestId || !withinUtf8Bytes(input.content, 16 * 1024)) {
+      throw Object.assign(new TypeError('CONVERSATION_MESSAGE_INVALID'), { code: 'CONVERSATION_MESSAGE_INVALID' })
+    }
+    if (input.kind === 'question' && !input.requestHash) {
+      throw Object.assign(new TypeError('CONVERSATION_MESSAGE_INVALID'), { code: 'CONVERSATION_MESSAGE_INVALID' })
+    }
   }
   return {
     schema: CONVERSATION_MESSAGE_SCHEMA,
@@ -83,6 +100,10 @@ function normalizedMessage(input, now) {
     provenance: normalizedProvenance(input.provenance),
     ...(input.taskId ? { taskId: input.taskId } : {}),
     ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+    ...(input.mode ? { mode: input.mode } : {}),
+    ...(input.requestId ? { requestId: input.requestId } : {}),
+    ...(input.requestHash ? { requestHash: input.requestHash } : {}),
+    ...(input.failureCode ? { failureCode: input.failureCode } : {}),
     createdAt: input.createdAt ?? new Date(now()).toISOString(),
   }
 }
@@ -90,6 +111,7 @@ function normalizedMessage(input, now) {
 export class DurableConversationLedger {
   #messages = []
   #messageIds = new Set()
+  #asks = new Map()
   #writes = Promise.resolve()
 
   constructor({ filePath, audit, now = () => Date.now() }, token) {
@@ -128,6 +150,12 @@ export class DurableConversationLedger {
       } catch (error) {
         if (error?.code !== 'ENOENT') throw error
       }
+      for (const record of ledger.#asks.values()) {
+        if (record.status === 'pending') {
+          record.status = 'unknown'
+          record.failureCode = 'ASK_OUTCOME_UNKNOWN'
+        }
+      }
       return ledger
     } catch (error) {
       await ledger.close()
@@ -141,10 +169,10 @@ export class DurableConversationLedger {
       if (this.#messageIds.has(message.messageId)) {
         throw Object.assign(new Error('CONVERSATION_MESSAGE_EXISTS'), { code: 'CONVERSATION_MESSAGE_EXISTS' })
       }
-      await appendFile(this.filePath, `${JSON.stringify(message)}\n`, { encoding: 'utf8', mode: 0o600 })
+      await appendFile(this.filePath, `${JSON.stringify(message)}\n`, { encoding: 'utf8', mode: 0o600, flush: true })
       this.#messages.push(message)
       this.#messageIds.add(message.messageId)
-      this.audit.append({
+      await Promise.resolve(this.audit.append({
         kind: 'ceo.conversation.message',
         messageId: message.messageId,
         conversationId: message.conversationId,
@@ -156,9 +184,116 @@ export class DurableConversationLedger {
         verification: message.provenance.verification,
         ...(message.taskId ? { taskId: message.taskId } : {}),
         at: message.createdAt,
-      })
+      }))
       return structuredClone(message)
     })
+  }
+
+  beginAsk({ requestId, requestHash, message } = {}) {
+    return this.#mutate(async () => {
+      if (!boundedString(requestId, 256) || !/^[0-9a-f]{64}$/.test(requestHash ?? '')) {
+        throw Object.assign(new TypeError('ASK_REQUEST_INVALID'), { code: 'ASK_REQUEST_INVALID' })
+      }
+      const normalized = normalizedMessage({
+        ...message,
+        kind: 'question',
+        mode: 'ask',
+        requestId,
+        requestHash,
+      }, this.now)
+      if (normalized.senderAgentId !== 'rod'
+        || normalized.recipientAgentIds.length !== 1
+        || normalized.content.length === 0) {
+        throw Object.assign(new TypeError('ASK_REQUEST_INVALID'), { code: 'ASK_REQUEST_INVALID' })
+      }
+      const existing = this.#asks.get(requestId)
+      if (existing) {
+        if (existing.requestHash !== requestHash) {
+          throw Object.assign(new Error('ASK_REQUEST_CONFLICT'), { code: 'ASK_REQUEST_CONFLICT' })
+        }
+        return structuredClone(existing)
+      }
+      if (this.#messageIds.has(normalized.messageId)) {
+        throw Object.assign(new Error('CONVERSATION_MESSAGE_EXISTS'), { code: 'CONVERSATION_MESSAGE_EXISTS' })
+      }
+      await appendFile(this.filePath, `${JSON.stringify(normalized)}\n`, { encoding: 'utf8', mode: 0o600, flush: true })
+      this.#messages.push(normalized)
+      this.#messageIds.add(normalized.messageId)
+      const record = {
+        requestId,
+        requestHash,
+        message: normalized,
+        status: 'pending',
+        answer: null,
+        failureCode: null,
+      }
+      this.#asks.set(requestId, record)
+      await this.#auditAsk('question', normalized)
+      return structuredClone(record)
+    })
+  }
+
+  finishAsk({ requestId, message, outcome = 'completed', failureCode = null } = {}) {
+    return this.#mutate(async () => {
+      if (!boundedString(requestId, 256)
+        || !['completed', 'failed-not-sent'].includes(outcome)
+        || (failureCode !== null && !FAILURE_CODE.test(failureCode))) {
+        throw Object.assign(new TypeError('ASK_RESULT_INVALID'), { code: 'ASK_RESULT_INVALID' })
+      }
+      const existing = this.#asks.get(requestId)
+      if (!existing) throw Object.assign(new Error('ASK_REQUEST_NOT_FOUND'), { code: 'ASK_REQUEST_NOT_FOUND' })
+      const normalized = normalizedMessage({
+        ...message,
+        kind: 'answer',
+        mode: 'ask',
+        requestId,
+        status: outcome === 'completed' ? 'completed' : 'failed',
+        ...(failureCode ? { failureCode } : {}),
+      }, this.now)
+      if (normalized.conversationId !== existing.message.conversationId
+        || normalized.senderAgentId !== existing.message.recipientAgentIds[0]
+        || normalized.recipientAgentIds.length !== 1
+        || normalized.recipientAgentIds[0] !== existing.message.senderAgentId
+        || normalized.replyTo !== existing.message.messageId) {
+        throw Object.assign(new Error('ASK_REQUEST_CONFLICT'), { code: 'ASK_REQUEST_CONFLICT' })
+      }
+      if (existing.status === 'unknown') {
+        throw Object.assign(new Error('ASK_OUTCOME_UNKNOWN'), { code: 'ASK_OUTCOME_UNKNOWN' })
+      }
+      if (existing.status !== 'pending') {
+        if (existing.answer?.messageId !== normalized.messageId
+          || existing.answer?.content !== normalized.content
+          || existing.answer?.status !== normalized.status) {
+          throw Object.assign(new Error('ASK_REQUEST_CONFLICT'), { code: 'ASK_REQUEST_CONFLICT' })
+        }
+        return structuredClone(existing)
+      }
+      if (this.#messageIds.has(normalized.messageId)) {
+        throw Object.assign(new Error('CONVERSATION_MESSAGE_EXISTS'), { code: 'CONVERSATION_MESSAGE_EXISTS' })
+      }
+      await appendFile(this.filePath, `${JSON.stringify(normalized)}\n`, { encoding: 'utf8', mode: 0o600, flush: true })
+      this.#messages.push(normalized)
+      this.#messageIds.add(normalized.messageId)
+      const completed = {
+        ...existing,
+        status: outcome,
+        answer: normalized,
+        failureCode: failureCode ?? null,
+      }
+      this.#asks.set(requestId, completed)
+      await this.#auditAsk('answer', normalized)
+      return structuredClone(completed)
+    })
+  }
+
+  async getAsk(requestId) {
+    await this.#writes
+    if (!boundedString(requestId, 256)) {
+      throw Object.assign(new TypeError('ASK_REQUEST_INVALID'), { code: 'ASK_REQUEST_INVALID' })
+    }
+    const existing = this.#asks.get(requestId)
+    if (!existing) return null
+    return structuredClone(existing)
   }
 
   list(conversationId = 'main', options = {}) {
@@ -168,6 +303,15 @@ export class DurableConversationLedger {
 
   listAll(options = {}) {
     return this.#page(this.#messages, options)
+  }
+
+  // Admission replay must resolve the exact durable message pointer.  Do not
+  // approximate this with a bounded history page: a receipt may refer to an
+  // older message that is no longer in the caller's latest page.
+  getMessage(messageId) {
+    if (!boundedString(messageId, 256)) return null
+    const message = this.#messages.find((candidate) => candidate.messageId === messageId)
+    return message ? structuredClone(message) : null
   }
 
   #page(messages, { limit = Infinity, before = null } = {}) {
@@ -194,6 +338,23 @@ export class DurableConversationLedger {
     return result
   }
 
+  async #auditAsk(messageKind, message) {
+    await this.audit.append({
+      kind: 'ceo.conversation.message',
+      messageId: message.messageId,
+      conversationId: message.conversationId,
+      role: message.role,
+      senderAgentId: message.senderAgentId,
+      recipientAgentIds: [...message.recipientAgentIds],
+      messageKind,
+      status: message.status,
+      mode: 'ask',
+      requestId: message.requestId,
+      verification: message.provenance.verification,
+      at: message.createdAt,
+    })
+  }
+
   #restore(input) {
     let message
     try {
@@ -216,5 +377,31 @@ export class DurableConversationLedger {
     if (this.#messageIds.has(message.messageId)) throw new Error('CONVERSATION_HISTORY_INVALID')
     this.#messages.push(message)
     this.#messageIds.add(message.messageId)
+    if (message.kind === 'question') {
+      if (this.#asks.has(message.requestId)) throw new Error('CONVERSATION_HISTORY_INVALID')
+      this.#asks.set(message.requestId, {
+        requestId: message.requestId,
+        requestHash: message.requestHash,
+        message,
+        status: 'pending',
+        answer: null,
+        failureCode: null,
+      })
+    } else if (message.kind === 'answer') {
+      const existing = this.#asks.get(message.requestId)
+      if (!existing || existing.answer || message.replyTo !== existing.message.messageId
+        || message.conversationId !== existing.message.conversationId
+        || message.senderAgentId !== existing.message.recipientAgentIds[0]
+        || message.recipientAgentIds.length !== 1
+        || message.recipientAgentIds[0] !== existing.message.senderAgentId) {
+        throw new Error('CONVERSATION_HISTORY_INVALID')
+      }
+      this.#asks.set(message.requestId, {
+        ...existing,
+        status: message.status === 'completed' ? 'completed' : 'failed-not-sent',
+        answer: message,
+        failureCode: message.failureCode ?? null,
+      })
+    }
   }
 }

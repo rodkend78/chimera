@@ -12,7 +12,13 @@ test('task message HTTP route requires operator session and CSRF before reading 
   const sessions = await OperatorSessionManager.open({ filePath: join(directory, 'session.json') })
   const session = sessions.exchangeBootstrap(sessions.issueBootstrap())
   const calls = []
-  const runtime = { messageTask: async input => { calls.push(input); if (input.replyTo === 'foreign') throw Object.assign(new Error('TASK_MESSAGE_PARENT_INVALID'), { code: 'TASK_MESSAGE_PARENT_INVALID' }); return { acknowledgement: 'Saved', message: input } } }
+  let failureCode = null
+  const runtime = { messageTask: async input => {
+    calls.push(input)
+    if (failureCode) throw Object.assign(new Error(failureCode), { code: failureCode })
+    if (input.replyTo === 'foreign') throw Object.assign(new Error('TASK_MESSAGE_PARENT_INVALID'), { code: 'TASK_MESSAGE_PARENT_INVALID' })
+    return { acknowledgement: 'Saved', message: input }
+  } }
   const server = createServer(async (request, response) => {
     const result = await handleTaskMessageRequest({ request, runtime, operatorSessions: sessions })
     response.writeHead(result.status, { 'content-type': 'application/json' }); response.end(JSON.stringify(result.body))
@@ -30,6 +36,13 @@ test('task message HTTP route requires operator session and CSRF before reading 
   const accepted = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
   assert.equal(accepted.status, 200); assert.deepEqual(calls[0], body)
   assert.equal((await fetch(url, { method: 'POST', headers, body: JSON.stringify({ ...body, replyTo: 'foreign' }) })).status, 400)
+  for (const code of ['TASK_ADMISSION_INVALID', 'TASK_DESTINATION_REVISION_INVALID']) {
+    failureCode = code
+    const rejected = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
+    assert.equal(rejected.status, 400)
+    assert.deepEqual(await rejected.json(), { error: code })
+  }
+  failureCode = null
   assert.equal((await fetch(url, { method: 'POST', headers, body: '{invalid' })).status, 400)
   assert.equal((await fetch(url, { method: 'POST', headers, body: 'x'.repeat(40000) })).status, 413)
 })

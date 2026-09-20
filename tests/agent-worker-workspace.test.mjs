@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { chmod, lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { MemoryAuditLog } from '../src/audit-log.mjs'
-import { agentManifestFromHermesCandidate } from '../src/agents/registry.mjs'
+import { agentManifestFromHermesCandidate, agentManifestFromNativeInput } from '../src/agents/registry.mjs'
 
 function manifest() {
   return agentManifestFromHermesCandidate({
@@ -72,6 +72,7 @@ test('a worker gets a read-only continuity capsule with persona, memory, skills,
       memory: { files: 1, bytes: 31 },
       skills: { files: 1, bytes: 31 },
       excluded: ['credentials', 'provider-sessions', 'private-keys', 'authority-grants', 'transient-runtime-state', 'skill-assets'],
+      dependencyStatus: 'unverified',
     })
   } finally {
     await removeReadonlyTree(directory)
@@ -94,6 +95,88 @@ test('workspace materialization rejects traversal before creating a usable worke
   }
 })
 
+test('native workspace requires persona and retains an empty memory file while allowing optional skills', async () => {
+  const { AgentWorkerWorkspace } = await import('../src/agents/worker-workspace.mjs')
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-native-persona-'))
+  try {
+    await assert.rejects(AgentWorkerWorkspace.open({
+      rootDir: directory,
+      manifest: agentManifestFromNativeInput({
+        agentId: 'native-agent', displayName: 'Native', role: 'Testing', capabilities: ['testing'],
+      }),
+      audit: new MemoryAuditLog(),
+      referenceProvider: {
+        async materialize(_reference, { kind }) {
+          if (kind === 'persona') return []
+          if (kind === 'memory') return [{ path: 'MEMORY.md', content: '' }]
+          return []
+        },
+      },
+    }), /NATIVE_PERSONA_UNAVAILABLE/)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('Hermes workspace rejects a declared zero-file persona or memory layer before publication', async () => {
+  const { AgentWorkerWorkspace } = await import('../src/agents/worker-workspace.mjs')
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-required-layers-'))
+  try {
+    for (const missingLayer of ['persona', 'memory']) {
+      let calls = 0
+      await assert.rejects(AgentWorkerWorkspace.open({
+        rootDir: directory,
+        manifest: manifest(),
+        audit: new MemoryAuditLog(),
+        referenceProvider: {
+          async materialize(_reference, { kind }) {
+            calls += 1
+            if (kind === 'persona') return missingLayer === 'persona' ? [] : [{ path: 'SOUL.md', content: 'Required persona.' }]
+            if (kind === 'memory') return missingLayer === 'memory' ? [] : [{ path: 'MEMORY.md', content: '' }]
+            return []
+          },
+        },
+      }), /WORKER_CONTINUITY_INCOMPLETE/)
+      assert.equal(calls, 3)
+      await assert.rejects(lstat(join(directory, 'ace')), { code: 'ENOENT' })
+    }
+  } finally {
+    await removeReadonlyTree(directory)
+  }
+})
+
+test('native workspace keeps a retained empty memory file valid across local reopen', async () => {
+  const { AgentWorkerWorkspace } = await import('../src/agents/worker-workspace.mjs')
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-empty-memory-'))
+  const nativeManifest = agentManifestFromNativeInput({
+    agentId: 'native-empty-memory', displayName: 'Native Empty Memory', role: 'Testing', capabilities: ['testing'],
+  })
+  try {
+    const original = await AgentWorkerWorkspace.open({
+      rootDir: directory,
+      manifest: nativeManifest,
+      audit: new MemoryAuditLog(),
+      referenceProvider: {
+        async materialize(_reference, { kind }) {
+          if (kind === 'persona') return [{ path: 'SOUL.md', content: 'Native persona.' }]
+          if (kind === 'memory') return [{ path: 'MEMORY.md', content: '' }]
+          return []
+        },
+      },
+    })
+    assert.deepEqual(original.context().report.memory, { files: 1, bytes: 0 })
+    const reopened = await AgentWorkerWorkspace.openLocal({
+      workspacePath: original.path,
+      manifest: nativeManifest,
+      audit: new MemoryAuditLog(),
+    })
+    assert.deepEqual(reopened.context().report.memory, { files: 1, bytes: 0 })
+    assert.deepEqual(reopened.context().skills, [])
+  } finally {
+    await removeReadonlyTree(directory)
+  }
+})
+
 test('workspace can be safely rematerialized after a runtime restart', async () => {
   const { AgentWorkerWorkspace } = await import('../src/agents/worker-workspace.mjs')
   const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-rematerialize-'))
@@ -108,6 +191,207 @@ test('workspace can be safely rematerialized after a runtime restart', async () 
     await AgentWorkerWorkspace.open(options)
     const reopened = await AgentWorkerWorkspace.open(options)
     assert.equal((await readFile(join(reopened.path, 'mounts/memory/CURRENT.md'), 'utf8')), 'current')
+  } finally {
+    await removeReadonlyTree(directory)
+  }
+})
+
+test('workspace can reopen the existing local continuity capsule without a reference provider', async () => {
+  const { AgentWorkerWorkspace } = await import('../src/agents/worker-workspace.mjs')
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-local-reopen-'))
+  try {
+    const workerManifest = manifest()
+    const original = await AgentWorkerWorkspace.open({
+      rootDir: directory,
+      manifest: workerManifest,
+      audit: new MemoryAuditLog(),
+      referenceProvider: { async materialize() { return [{ path: 'LOCAL.md', content: 'local-only' }] } },
+    })
+    const reopened = await AgentWorkerWorkspace.openLocal({
+      workspacePath: original.path,
+      manifest: workerManifest,
+      audit: new MemoryAuditLog(),
+    })
+    assert.deepEqual(reopened.context(), original.context())
+    assert.deepEqual(reopened.state().mounts, original.state().mounts)
+    await assert.rejects(AgentWorkerWorkspace.openLocal({
+      workspacePath: original.path,
+      manifest: { ...workerManifest, source: { ...workerManifest.source, ref: 'chimera://other-agent' } },
+      audit: new MemoryAuditLog(),
+    }), /WORKER_CONTINUITY_MANIFEST_MISMATCH/)
+  } finally {
+    await removeReadonlyTree(directory)
+  }
+})
+
+test('local continuity reopen rejects a manifest-only capsule when declared layers are missing', async () => {
+  const { AgentWorkerWorkspace } = await import('../src/agents/worker-workspace.mjs')
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-local-missing-layers-'))
+  try {
+    const workerManifest = manifest()
+    const original = await AgentWorkerWorkspace.open({
+      rootDir: directory,
+      manifest: workerManifest,
+      audit: new MemoryAuditLog(),
+      referenceProvider: {
+        async materialize(_reference, { kind }) {
+          if (kind === 'persona') return [{ path: 'SOUL.md', content: 'Required persona.' }]
+          if (kind === 'memory') return [{ path: 'MEMORY.md', content: '' }]
+          return [{ path: 'SKILL.md', content: 'Optional skill.' }]
+        },
+      },
+    })
+    await removeReadonlyTree(join(original.path, 'mounts'))
+    await assert.rejects(AgentWorkerWorkspace.openLocal({
+      workspacePath: original.path,
+      manifest: workerManifest,
+      audit: new MemoryAuditLog(),
+    }), /WORKER_CONTINUITY_INCOMPLETE/)
+  } finally {
+    await removeReadonlyTree(directory)
+  }
+})
+
+test('local continuity reopen preserves the bounded maximum skill catalog without rematerialization', async () => {
+  const { AgentWorkerWorkspace } = await import('../src/agents/worker-workspace.mjs')
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-local-skills-'))
+  try {
+    const workerManifest = manifest()
+    const original = await AgentWorkerWorkspace.open({
+      rootDir: directory,
+      manifest: workerManifest,
+      audit: new MemoryAuditLog(),
+      referenceProvider: {
+        async materialize(_reference, { kind }) {
+          if (kind === 'persona') return [{ path: 'SOUL.md', content: 'Local persona.' }]
+          if (kind === 'memory') return [{ path: 'MEMORY.md', content: 'Local memory.' }]
+          return Array.from({ length: 512 }, (_, index) => ({ path: `skill-${String(index).padStart(3, '0')}.md`, content: `Skill ${index}` }))
+        },
+      },
+    })
+    const reopened = await AgentWorkerWorkspace.openLocal({
+      workspacePath: original.path,
+      manifest: workerManifest,
+      audit: new MemoryAuditLog(),
+    })
+    assert.equal(reopened.context().skills.length, 512)
+    assert.equal(reopened.context().report.skills.files, 512)
+  } finally {
+    await removeReadonlyTree(directory)
+  }
+})
+
+test('workspace continuity refresh preserves scratch and task artifacts and retains old mounts on failure', async () => {
+  const { AgentWorkerWorkspace } = await import('../src/agents/worker-workspace.mjs')
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-refresh-'))
+  const audit = new MemoryAuditLog()
+  const workerManifest = manifest()
+  try {
+    const current = { value: 'current' }
+    const options = {
+      rootDir: directory,
+      manifest: workerManifest,
+      audit,
+      referenceProvider: { async materialize() { return [{ path: 'CURRENT.md', content: current.value }] } },
+    }
+    const workspace = await AgentWorkerWorkspace.open(options)
+    await writeFile(join(workspace.path, 'scratch/notes.txt'), 'keep me')
+    await writeFile(join(workspace.path, 'task-artifact.json'), '{"result":"keep me"}')
+    current.value = 'updated'
+    const refreshed = await AgentWorkerWorkspace.refresh(options)
+    assert.equal(await readFile(join(refreshed.path, 'mounts/persona/CURRENT.md'), 'utf8'), 'updated')
+    assert.equal(await readFile(join(refreshed.path, 'scratch/notes.txt'), 'utf8'), 'keep me')
+    assert.equal(await readFile(join(refreshed.path, 'task-artifact.json'), 'utf8'), '{"result":"keep me"}')
+
+    await assert.rejects(AgentWorkerWorkspace.refresh({
+      ...options,
+      referenceProvider: { async materialize() { throw new Error('REFERENCE_UNAVAILABLE') } },
+    }), /REFERENCE_UNAVAILABLE/)
+    assert.equal(await readFile(join(refreshed.path, 'mounts/persona/CURRENT.md'), 'utf8'), 'updated')
+    assert.equal(await readFile(join(refreshed.path, 'scratch/notes.txt'), 'utf8'), 'keep me')
+  } finally {
+    await removeReadonlyTree(directory)
+  }
+})
+
+test('workspace refresh restores old mounts when publishing the refresh audit fails', async () => {
+  const { AgentWorkerWorkspace } = await import('../src/agents/worker-workspace.mjs')
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-refresh-audit-'))
+  const audit = {
+    append(fact) {
+      if (fact.kind === 'worker.workspace.refreshed') throw new Error('AUDIT_UNAVAILABLE')
+    },
+  }
+  const workerManifest = manifest()
+  try {
+    const options = {
+      rootDir: directory,
+      manifest: workerManifest,
+      audit,
+      referenceProvider: { async materialize() { return [{ path: 'CURRENT.md', content: 'old' }] } },
+    }
+    const workspace = await AgentWorkerWorkspace.open(options)
+    await assert.rejects(AgentWorkerWorkspace.refresh({
+      ...options,
+      referenceProvider: { async materialize() { return [{ path: 'CURRENT.md', content: 'new' }] } },
+    }), /AUDIT_UNAVAILABLE/)
+    assert.equal(await readFile(join(workspace.path, 'mounts/persona/CURRENT.md'), 'utf8'), 'old')
+    assert.equal(await readFile(join(workspace.path, 'mounts/memory/CURRENT.md'), 'utf8'), 'old')
+    assert.equal(await readFile(join(workspace.path, 'mounts/skills/CURRENT.md'), 'utf8'), 'old')
+  } finally {
+    await removeReadonlyTree(directory)
+  }
+})
+
+test('workspace refresh awaits an asynchronous audit failure before cleaning rollback backups', async () => {
+  const { AgentWorkerWorkspace } = await import('../src/agents/worker-workspace.mjs')
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-refresh-async-audit-'))
+  const audit = {
+    async append(fact) {
+      if (fact.kind === 'worker.workspace.refreshed') throw new Error('ASYNC_AUDIT_UNAVAILABLE')
+    },
+  }
+  try {
+    const options = {
+      rootDir: directory,
+      manifest: manifest(),
+      audit,
+      referenceProvider: { async materialize() { return [{ path: 'CURRENT.md', content: 'old' }] } },
+    }
+    const workspace = await AgentWorkerWorkspace.open(options)
+    await assert.rejects(AgentWorkerWorkspace.refresh({
+      ...options,
+      referenceProvider: { async materialize() { return [{ path: 'CURRENT.md', content: 'new' }] } },
+    }), /ASYNC_AUDIT_UNAVAILABLE/)
+    assert.equal(await readFile(join(workspace.path, 'mounts/persona/CURRENT.md'), 'utf8'), 'old')
+  } finally {
+    await removeReadonlyTree(directory)
+  }
+})
+
+test('workspace refresh reconciles an interrupted old-mount move and preserves scratch artifacts', async () => {
+  const { AgentWorkerWorkspace } = await import('../src/agents/worker-workspace.mjs')
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-refresh-interrupted-'))
+  try {
+    const options = {
+      rootDir: directory,
+      manifest: manifest(),
+      audit: new MemoryAuditLog(),
+      referenceProvider: { async materialize() { return [{ path: 'CURRENT.md', content: 'old' }] } },
+    }
+    const workspace = await AgentWorkerWorkspace.open(options)
+    await writeFile(join(workspace.path, 'scratch/keep.txt'), 'scratch survives')
+    await writeFile(join(workspace.path, 'task-artifact.json'), 'artifact survives')
+    await rename(join(workspace.path, 'mounts'), join(directory, '.ace.mounts.tmp'))
+
+    const refreshed = await AgentWorkerWorkspace.refresh({
+      ...options,
+      referenceProvider: { async materialize() { return [{ path: 'CURRENT.md', content: 'new' }] } },
+    })
+    assert.equal(await readFile(join(refreshed.path, 'mounts/persona/CURRENT.md'), 'utf8'), 'new')
+    assert.equal(await readFile(join(refreshed.path, 'scratch/keep.txt'), 'utf8'), 'scratch survives')
+    assert.equal(await readFile(join(refreshed.path, 'task-artifact.json'), 'utf8'), 'artifact survives')
+    await assert.rejects(lstat(join(directory, '.ace.mounts.tmp')), { code: 'ENOENT' })
   } finally {
     await removeReadonlyTree(directory)
   }

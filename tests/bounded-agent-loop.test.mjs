@@ -154,6 +154,29 @@ test('bounded agent loop stops after the configured tool-call bound', async () =
   }), (error) => error?.code === 'AGENT_LOOP_TOOL_LIMIT')
 })
 
+test('bounded agent loop halts after an unknown tool effect and never asks the model to repeat it', async () => {
+  let modelCalls = 0
+  const checkpoints = []
+  const events = []
+  await assert.rejects(runBoundedAgentLoop({
+    router: createDeterministicModelRouter({ responder: async (_prompt, context) => {
+      modelCalls += 1
+      if (context.loop.turn === 1) return { status: 'tool_request', toolCall: { name: 'read', arguments: { path: 'scratch/mutation.txt' } } }
+      return { status: 'completed', summary: 'The mutation is complete.' }
+    } }),
+    worker: { async executeTool() { return { status: 'unknown', reason: 'WORKER_TOOL_OUTCOME_UNKNOWN' } } },
+    objective: 'Perform one mutation.',
+    context: { taskId: 'task-tool-unknown', nodeId: 'node-one', specialistAgent: { agentId: 'ace' } },
+    availableTools: ['read'],
+    onCheckpoint: async checkpoint => checkpoints.push(checkpoint),
+    onEvent: async event => events.push(event),
+  }), { code: 'AGENT_LOOP_TOOL_OUTCOME_UNKNOWN' })
+  assert.equal(modelCalls, 1)
+  assert.equal(checkpoints.filter(value => value.stage === 'tool-dispatch').length, 1)
+  assert.equal(checkpoints.at(-1).effectOutcome, 'unknown')
+  assert.equal(events.filter(event => event.kind === 'tool_result').length, 0)
+})
+
 test('bounded agent loop resolves task execution context immediately before each tool call', async () => {
   let resolveCount = 0
   const router = createDeterministicModelRouter({

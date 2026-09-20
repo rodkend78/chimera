@@ -64,7 +64,13 @@ async function fixture(directory, { readTier = 'auto', approvalBroker } = {}) {
   })
   const workspace = await AgentWorkerWorkspace.open({
     rootDir: join(directory, 'workers'), manifest, audit,
-    referenceProvider: { async materialize() { return [] } }, now: () => clock,
+    referenceProvider: {
+      async materialize(_reference, { kind }) {
+        if (kind === 'persona') return [{ path: 'SOUL.md', content: 'Ace worker fixture.' }]
+        if (kind === 'memory') return [{ path: 'MEMORY.md', content: '' }]
+        return []
+      },
+    }, now: () => clock,
   })
   const mailbox = await DurableAgentMailbox.open({ filePath: join(directory, 'mailbox.jsonl'), audit, now: () => clock })
   let modelRuns = 0
@@ -120,6 +126,40 @@ test('every worker tool call goes through DSH and a denied call never reaches it
   }
 })
 
+test('an executor exception after tool entry remains an unknown effect, not an ordinary failed result', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-harness-tool-unknown-'))
+  try {
+    const f = await fixture(directory)
+    f.options.toolExecutors.read = async () => {
+      f.toolRuns.read += 1
+      throw Object.assign(new Error('response lost after mutation'), { code: 'FIXTURE_RESPONSE_LOST', dispatchState: 'not_sent' })
+    }
+    const worker = await f.AgentHarnessWorker.open(f.options)
+    await worker.start()
+    const result = await worker.executeTool({ name: 'read', arguments: { path: 'mounts/memory/MEMORY.md' }, callId: 'unknown-tool-call' })
+    assert.equal(result.status, 'unknown')
+    assert.equal(result.reason, 'WORKER_TOOL_OUTCOME_UNKNOWN')
+    assert.equal(f.toolRuns.read, 1)
+  } finally { await removeTree(directory) }
+})
+
+test('an entered executor cannot forge a pre-entry lease denial code to permit retry', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-harness-forged-lease-code-'))
+  try {
+    const f = await fixture(directory)
+    f.options.toolExecutors.read = async () => {
+      f.toolRuns.read += 1
+      throw Object.assign(new Error('effect may already have happened'), { code: 'PROJECT_ACCESS_LEASE_INACTIVE' })
+    }
+    const worker = await f.AgentHarnessWorker.open(f.options)
+    await worker.start()
+    const result = await worker.executeTool({ name: 'read', arguments: { path: 'mounts/memory/MEMORY.md' }, callId: 'forged-lease-call' })
+    assert.equal(result.status, 'unknown')
+    assert.equal(result.reason, 'WORKER_TOOL_OUTCOME_UNKNOWN')
+    assert.equal(f.toolRuns.read, 1)
+  } finally { await removeTree(directory) }
+})
+
 test('trusted task context can bind a shared project workspace and narrower access lease', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'chimera-harness-project-context-'))
   try {
@@ -150,18 +190,21 @@ test('identity receipts cannot escape a revoked access lease while the root task
   try {
     const f = await fixture(directory)
     let active = true
+    let reads = 0
     f.options.toolExecutors = createHarnessExecutors({ accessProfileFor: () => 'sandbox' })
     const worker = await f.AgentHarnessWorker.open(f.options)
     await worker.start()
     const workspace = {
       path: directory, state: () => ({ path: directory }),
-      async readProjectIdentity() { active = false; return { checkoutCommit: 'must-not-be-returned' } },
+      async readProjectIdentity() { reads += 1; active = false; return { checkoutCommit: 'must-not-be-returned' } },
     }
     const result = await worker.executeTool(
       { name: 'read', arguments: { path: 'mounts/project/identity.json' } },
       { workspace, taskScoped: true, assertActive: () => active, assertTaskActive: () => true },
     )
-    assert.deepEqual(result, { status: 'failed', reason: 'PROJECT_ACCESS_LEASE_INACTIVE' })
+    assert.equal(result.status, 'unknown')
+    assert.equal(result.reason, 'WORKER_TOOL_OUTCOME_UNKNOWN')
+    assert.equal(reads, 1)
   } finally { await removeTree(directory) }
 })
 

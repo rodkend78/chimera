@@ -1,15 +1,18 @@
 import { isAllowedRequestOrigin } from './http-safety.mjs'
 import { authorizeOperatorRequest } from './operator-http-auth.mjs'
 
-export async function handleAntigravityRequest({ pathname, request, operatorSessions, connection }) {
+export async function handleAntigravityRequest({ pathname, request, operatorSessions, connection,
+  state = connection?.state, refresh = connection?.refresh } = {}) {
   if (!['/api/antigravity/state', '/api/antigravity/refresh', '/api/antigravity/open'].includes(pathname)) return null
   if (!isAllowedRequestOrigin(request.headers?.origin)) return { status: 403, body: { error: 'ORIGIN_BLOCKED' } }
   const auth = authorizeOperatorRequest({ pathname, method: request.method, headers: request.headers }, operatorSessions)
   if (!auth.allowed) return { status: auth.status, body: { error: auth.error } }
   const expected = pathname.endsWith('/state') ? 'GET' : 'POST'
   if (request.method !== expected) return { status: 405, body: { error: 'METHOD_NOT_ALLOWED' } }
+  const readState = state === connection?.state && typeof state === 'function' ? state.bind(connection) : state
+  const runRefresh = refresh === connection?.refresh && typeof refresh === 'function' ? refresh.bind(connection) : refresh
   try {
-    if (expected === 'GET') return { status: 200, body: connection.state() }
+    if (expected === 'GET') return { status: 200, body: readState() }
     let size = 0, text = ''
     for await (const chunk of request) {
       size += Buffer.byteLength(chunk)
@@ -21,7 +24,7 @@ export async function handleAntigravityRequest({ pathname, request, operatorSess
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) return { status: 400, body: { error: 'ANTIGRAVITY_REQUEST_INVALID' } }
     return pathname.endsWith('/open')
       ? { status: 202, body: await connection.openDesktop() }
-      : { status: 200, body: await connection.refresh() }
+      : { status: 200, body: await runRefresh() }
   } catch (error) {
     return { status: 503, body: { error: /^ANTIGRAVITY_[A-Z_]+$/.test(error.code) ? error.code : 'ANTIGRAVITY_UNAVAILABLE' } }
   }

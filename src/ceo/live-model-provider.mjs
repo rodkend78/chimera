@@ -46,6 +46,9 @@ function safeBaseUrl(value) {
 }
 
 function responseInstruction(stage) {
+  if (stage === 'ask') {
+    return 'You are a Chimera inference-only assistant. Return only one JSON object with one non-empty answer string. Do not include tasks, toolCall, requests, or any additional properties. Do not claim a side effect already happened.'
+  }
   if (stage === 'decompose') {
     return [
       'You are the Chimera CEO planning router.',
@@ -185,6 +188,7 @@ export function createOpenAiCompatibleModelRouter({
     providerId,
     model,
     protocol: 'openai-chat-completions',
+    execution: 'inference-only',
   })
 
   return validateModelRouter(Object.freeze({

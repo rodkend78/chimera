@@ -44,4 +44,22 @@ GitHub CI installs Bubblewrap and executes Linux-only integration checks for scr
 
 Model-driven tool calling is bound through `AgentHarnessWorker.executeTool`. AgentCore adds `mcp__chimera_worker__code` and `mcp__chimera_worker__computer`; both derive ownership from the signed agent execution context. No model response is treated as authority merely because it mentions a tool.
 
+## Task-scoped execution and evidence
+
+An imported specialist receives a task-bound lease only after RJ's durable plan
+identifies the specialist. Project work is serialized per project queue and the
+worker's physical workspace, lease, and terminal journal must settle before a
+later assignment can use the same resource. A confirm-tier tool request stays
+in the Decisions surface until the operator approves that exact task and
+resource; closing or restarting the workspace does not approve it or replay it.
+
+The task workspace separates model summaries from runtime evidence. A bounded
+executor can issue a check receipt only from the runtime-owned task context and
+current project/revision observations. Work, checks, review readiness, and
+publication are separate stages; a local commit, model statement, or successful
+HTTP response does not make a task published. If a provider or tool outcome is
+unknown after dispatch, the task retains the observation and blocks automatic
+retry or fallback. Continue only through a new explicit, task-bound action after
+inspection.
+
 AgentCore Browser and Code Interpreter cover browser/computer-use and coding work. They are not an unrestricted Windows or macOS desktop. Native desktop applications will require the planned EC2/DCV adapter behind the same worker contract.

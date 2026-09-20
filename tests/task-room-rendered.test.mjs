@@ -35,11 +35,12 @@ test('rendered task room addresses participants through dock, replies, acknowled
   let rejectGuidance = true
   const state = {
     agent: { id: 'ceo', name: 'RJ', status: 'Working' }, controller: { type: 'agent', id: 'ceo' }, suspended: false,
+    draftScope: { schema: 'chimera.draft-scope.v1', workspaceId: 'task-room-fixture', operatorId: 'operator-fixture' },
     browser: { running: true, tabs: [] }, activity: [], recentEvents: [], decisions: [], audit: { valid: true },
     models: { selected: { providerId: 'fixture', model: 'fixture' }, providers: [] }, auth: { codex: { connected: true, status: 'connected' } },
     agents: { specialists: [{ agentId: 'ace', displayName: 'Ace' }, { agentId: 'iris', displayName: 'Iris' }] },
-    tasks: [{ taskId: 'room', objective: 'Review the shared evidence', status: 'running' }],
-    teamMessaging: { tasks: [{ taskId: 'room', participants: ['ceo', 'ace', 'iris'], eligibleRecipients: ['ceo', 'ace', 'iris'], deliveries: [
+    tasks: [{ taskId: 'room', objective: 'Review the shared evidence', status: 'running', destinationRevision: 1 }],
+    teamMessaging: { tasks: [{ taskId: 'room', destinationRevision: 1, participants: ['ceo', 'ace', 'iris'], eligibleRecipients: ['ceo', 'ace', 'iris'], deliveries: [
       { messageId: 'handoff', senderAgentId: 'ceo', recipientAgentId: 'ace', status: 'waiting', waitingForAgentId: 'iris' },
       { messageId: 'expired', senderAgentId: 'ace', recipientAgentId: 'iris', status: 'expired', reason: 'GRANT_EXPIRED' },
     ] }] },
@@ -58,7 +59,7 @@ test('rendered task room addresses participants through dock, replies, acknowled
       calls.push({ path, body })
       if (path === '/api/tasks/message') {
         if (rejectGuidance) { rejectGuidance = false; return route.fulfill({ status: 400, json: { error: 'TASK_MESSAGE_RECIPIENT_INVALID' } }) }
-        return route.fulfill({ json: { acknowledgement: 'Guidance saved. Applies only at the next safe boundary; finished assignments are not restarted.' } })
+        return route.fulfill({ json: { taskId: 'room', destinationRevision: 2, message: { messageId: 'operator-guidance-fixture' }, receipt: { requestId: body.requestId, status: 'accepted', operation: 'task-message' }, acknowledgement: 'Guidance saved. Applies only at the next safe boundary; finished assignments are not restarted.' } })
       }
       if (path === '/api/tasks/cancel') { state.tasks[0].status = 'cancelled'; state.teamMessaging.tasks[0].eligibleRecipients = []; state.teamMessaging.tasks[0].deliveries[0].status = 'interrupted' }
       return route.fulfill({ json: {} })
@@ -68,18 +69,23 @@ test('rendered task room addresses participants through dock, replies, acknowled
     await page.getByRole('button', { name: 'Work', exact: true }).click()
     await page.getByRole('region', { name: 'Task collaboration' }).waitFor()
     await page.getByText('blocked (expired)', { exact: true }).waitFor()
-    await page.getByRole('checkbox', { name: '@Ace' }).check()
-    await page.getByRole('checkbox', { name: '@Iris' }).check()
-    await page.getByRole('button', { name: 'Reply to Ace', exact: true }).click()
-    await page.getByRole('button', { name: 'Clear reply' }).click()
-    await page.getByRole('button', { name: 'Reply to Ace', exact: true }).click()
-    await page.getByRole('textbox', { name: 'RJ queue objective' }).fill('Use the existing evidence only.')
-    await page.getByRole('button', { name: 'Send task guidance' }).click()
+    const composer = page.getByRole('region', { name: 'Conversation composer', exact: true })
+    await composer.getByRole('combobox', { name: 'Conversation action', exact: true }).selectOption('guidance')
+    await composer.getByRole('combobox', { name: 'Conversation task', exact: true }).selectOption('room')
+    await composer.getByRole('textbox', { name: 'Mention teammates', exact: true }).fill('Ace')
+    await composer.getByRole('option', { name: '@Ace · ace', exact: true }).click()
+    await composer.getByRole('textbox', { name: 'Mention teammates', exact: true }).fill('Iris')
+    await composer.getByRole('option', { name: '@Iris · iris', exact: true }).click()
+    await composer.getByRole('textbox', { name: 'Task guidance', exact: true }).fill('Use the existing evidence only.')
+    await composer.getByRole('button', { name: 'Guide task', exact: true }).click()
     await page.getByText('task message recipient invalid', { exact: true }).waitFor()
-    assert.equal(await page.getByRole('textbox', { name: 'RJ queue objective' }).inputValue(), 'Use the existing evidence only.')
-    await page.getByRole('button', { name: 'Send task guidance' }).click()
-    await page.getByText(/Guidance saved\. Applies only/).waitFor()
-    assert.deepEqual(calls.find(call => call.path === '/api/tasks/message').body, { taskId: 'room', recipientAgentIds: ['ace', 'iris'], replyTo: 'ace-reply', content: 'Use the existing evidence only.' })
+    assert.equal(await composer.getByRole('textbox', { name: 'Task guidance', exact: true }).inputValue(), 'Use the existing evidence only.')
+    await composer.getByRole('button', { name: 'Guide task', exact: true }).click()
+    // The effect is accepted either with the fixture acknowledgement or with
+    // the truthful stale-refresh suffix when a newer state read is pending.
+    await page.getByText(/Guidance saved\. Applies only|Request accepted\. The latest workspace state could not be confirmed; do not resend\./).waitFor()
+    const messageBody = calls.find(call => call.path === '/api/tasks/message').body
+    assert.deepEqual({ taskId: messageBody.taskId, recipientAgentIds: messageBody.recipientAgentIds, content: messageBody.content, expectedDestinationRevision: messageBody.expectedDestinationRevision }, { taskId: 'room', recipientAgentIds: ['ace', 'iris'], content: 'Use the existing evidence only.', expectedDestinationRevision: 1 })
     await page.locator('.toast').waitFor({ state: 'hidden' })
     await page.getByText('Reply to RJ: Review the evidence.', { exact: true }).waitFor()
     await page.getByRole('region', { name: 'Task collaboration' }).scrollIntoViewIfNeeded()
@@ -94,8 +100,8 @@ test('rendered task room addresses participants through dock, replies, acknowled
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
     await page.getByRole('button', { name: 'Stop task', exact: true }).click()
     await page.getByText('Task cancelled. Guidance is inactive.', { exact: true }).waitFor()
-    assert.equal(await page.getByRole('checkbox', { name: '@Ace' }).count(), 0)
-    assert.equal(await page.getByRole('button', { name: 'Send task guidance' }).isDisabled(), true)
+    assert.equal(await composer.getByRole('button', { name: '@Ace ×', exact: true }).count(), 1, 'inactive destination keeps the explicit recipient draft visible')
+    assert.equal(await composer.getByRole('button', { name: 'Guide task', exact: true }).isDisabled(), true)
     await page.getByText('interrupted', { exact: true }).waitFor()
     await page.locator('.toast').waitFor({ state: 'hidden' })
     await page.getByText('Task cancelled. Guidance is inactive.', { exact: true }).scrollIntoViewIfNeeded()

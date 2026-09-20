@@ -24,19 +24,24 @@ test('a confirm-tier worker tool pauses on the durable Decisions queue and recei
   try {
     const queue = await DurableDecisionQueue.open({ filePath: join(directory, 'decisions.jsonl'), audit, now: () => now })
     const pending = []
-    const broker = new WorkerToolApprovalBroker({ queue, audit, now: () => now, onPending: (actionId) => pending.push(actionId) })
+    const broker = new WorkerToolApprovalBroker({ queue, audit, now: () => now, onPending: (actionId, scope) => pending.push({ actionId, scope }) })
     const request = {
       actionId: 'dsh-worker-write-1', challengeHash: 'a'.repeat(64), agentId: 'ace', grantId: 'ace-grant',
       sessionId: 'worker-ace', callId: 'call-1', rootCallId: 'call-1', parentCallId: null,
       toolName: 'write', capability: 'filesystem.write', resource: 'dsh-tool:write', requestHash: 'b'.repeat(64),
+      taskId: 'task-1', nodeId: 'node-1', assignmentId: 'handoff-peer', canonicalAssignmentId: 'handoff-root',
       review: writeReview,
     }
     const waiting = broker.request(request)
     for (let attempt = 0; attempt < 20 && !queue.get(request.actionId); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 5))
     }
-    assert.deepEqual(pending, ['dsh-worker-write-1'])
+    assert.deepEqual(pending, [{ actionId: 'dsh-worker-write-1', scope: { taskId: 'task-1', nodeId: 'node-1', assignmentId: 'handoff-peer', canonicalAssignmentId: 'handoff-root' } }])
     assert.equal(queue.get('dsh-worker-write-1').title, 'Ace wants to use write')
+    assert.equal(queue.get('dsh-worker-write-1').taskId, 'task-1')
+    assert.equal(queue.get('dsh-worker-write-1').nodeId, 'node-1')
+    assert.equal(queue.get('dsh-worker-write-1').assignmentId, 'handoff-peer')
+    assert.equal(queue.get('dsh-worker-write-1').canonicalAssignmentId, 'handoff-root')
     assert.deepEqual(queue.get('dsh-worker-write-1').actionDiff, { tool: 'write', callId: 'call-1', requestHash: 'b'.repeat(64), review: writeReview })
 
     const human = generateIdentity('operator')

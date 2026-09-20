@@ -20,9 +20,10 @@ async function fixture(t, handler) {
   page.setDefaultTimeout(3000)
   const state = {
     agent: { id: 'ceo', name: 'RJ', status: 'Working' }, controller: { type: 'agent', id: 'ceo' }, suspended: false,
+    draftScope: { schema: 'chimera.draft-scope.v1', workspaceId: 'queue-continuity-fixture', operatorId: 'operator-fixture' },
     browser: { running: true, tabs: [] }, activity: [], recentEvents: [], decisions: [], audit: { valid: true },
     models: { selected: { providerId: 'fixture', model: 'fixture', providerName: 'Fixture', modelName: 'Fixture' }, providers: [] },
-    auth: { codex: { connected: true, status: 'connected' } }, agents: { specialists: [{ agentId: 'ace', displayName: 'Ace' }] },
+    auth: { codex: { connected: true, status: 'connected' } }, agents: { main: { agentId: 'ceo', displayName: 'RJ', role: 'CEO' }, specialists: [{ agentId: 'ace', displayName: 'Ace' }] },
     tasks: [{ taskId: 'alpha', objective: 'Alpha website review', status: 'running' }, { taskId: 'beta', objective: 'Beta export review', status: 'queued' }],
     teamMessaging: { tasks: ['alpha', 'beta'].map(taskId => ({ taskId, eligibleRecipients: ['ace'], participants: ['ceo', 'ace'], deliveries: [] })) },
     conversations: { channels: [
@@ -31,6 +32,22 @@ async function fixture(t, handler) {
     ], messages: [message('alpha', 'alpha-recent', 'Recent Alpha evidence'), message('beta', 'beta-recent', 'Recent Beta evidence')] },
   }
   const calls = [], errors = []
+  const workspace = taskId => {
+    const task = state.tasks.find(candidate => candidate.taskId === taskId) ?? { taskId, objective: taskId, status: 'unknown' }
+    return {
+      schema: 'chimera.task-workspace.v1',
+      task,
+      plan: null,
+      team: { taskId, participants: [], deliveries: [] },
+      conversation: { conversationId: `task:${taskId}`, messages: [] },
+      permissions: [], approvals: [],
+      files: { status: 'unloaded', review: null, artifacts: [] },
+      results: { taskId, summary: null, messages: [], reports: [] },
+      browser: null, routing: null,
+      evidence: { taskId, workProduced: { state: 'not-produced' }, checksPassed: { state: 'not-run' }, readyForReview: { state: 'not-reviewed' }, published: { state: 'not-published' } },
+      recovery: { taskId, state: 'not-needed', summary: 'No recovery action is recorded.', retained: [], actions: [], retryAllowed: false },
+    }
+  }
   page.on('pageerror', e => errors.push(e.message))
   page.on('console', m => { if (['error', 'warning'].includes(m.type()) && !m.text().includes('503 (Service Unavailable)')) errors.push(m.text()) })
   await page.routeWebSocket('**/api/browser/stream', socket => socket.onMessage(() => {}))
@@ -40,6 +57,15 @@ async function fixture(t, handler) {
     if (!path.startsWith('/api/')) return route.continue()
     if (path === '/api/operator/session') return route.fulfill({ json: { csrfToken: 'fixture', expiresAt: '2099-01-01T00:00:00Z' } })
     const body = route.request().method() === 'POST' ? route.request().postDataJSON() : null
+    // Selecting a task room now also reads the task-bound workspace. That is
+    // a separate read model, not conversation/task history, so keep it out of
+    // the history/action call ledger used by these continuity assertions.
+    const workspacePath = path.startsWith('/api/tasks/') && path.endsWith('/workspace')
+    if (workspacePath) {
+      assert.equal(route.request().method(), 'GET', 'workspace reads must never hide a write')
+      const taskId = decodeURIComponent(path.slice('/api/tasks/'.length, -'/workspace'.length))
+      return route.fulfill({ json: workspace(taskId) })
+    }
     if (path !== '/api/state') calls.push({ path, body, conversationId: url.searchParams.get('conversationId'), before: url.searchParams.get('before') })
     if (await handler?.({ path, body, route, state, url })) return
     await route.fulfill({ json: path === '/api/state' ? state : path === '/api/tasks' ? { tasks: [gamma], nextCursor: null }
@@ -67,7 +93,6 @@ test('Queue restores the viewed room after navigation but clears old reply recip
   await betaRoom(rooms).click()
   await page.getByRole('checkbox', { name: '@Ace', exact: true }).check()
   await page.getByRole('button', { name: 'Reply to Ace', exact: true }).click()
-  await page.getByRole('button', { name: 'General guidance', exact: true }).waitFor()
   await roundTrip(page)
   assert.match(await page.locator('.chat-thread-header').textContent(), /Beta export review/)
   assert.equal(await page.getByRole('combobox', { name: 'Task to control' }).inputValue(), 'beta')
@@ -83,15 +108,15 @@ test('older tasks and room messages survive navigation and the next read uses th
   await rooms.getByRole('button', { name: /Gamma archived review/ }).waitFor()
   await betaRoom(rooms).click()
   await page.getByRole('button', { name: 'Load older messages', exact: true }).click()
-  await page.getByText('Earlier Beta evidence', { exact: true }).waitFor()
+  await page.getByLabel('Conversation transcript', { exact: true }).getByText('Earlier Beta evidence', { exact: true }).waitFor()
   await roundTrip(page)
   assert.equal(await rooms.getByRole('button', { name: /Gamma archived review/ }).count(), 1)
-  assert.equal(await page.getByText('Earlier Beta evidence', { exact: true }).isVisible(), true)
+  assert.equal(await page.getByLabel('Conversation transcript', { exact: true }).getByText('Earlier Beta evidence', { exact: true }).count(), 1)
   assert.equal(calls.length, 2, 'navigation must not fetch history again')
   await page.getByRole('button', { name: 'Load older messages', exact: true }).click()
   await page.waitForFunction(() => !document.querySelector('.chat-transcript .history-load').disabled)
   assert.deepEqual(calls.filter(c => c.path === '/api/conversations/messages').map(c => [c.conversationId, c.before]), [['task:beta', 'beta-recent'], ['task:beta', 'beta-old']])
-  assert.equal(await page.getByText('Earlier Beta evidence', { exact: true }).count(), 1)
+  assert.equal(await page.getByLabel('Conversation transcript', { exact: true }).getByText('Earlier Beta evidence', { exact: true }).count(), 1)
   assert.equal(calls.some(c => c.body), false)
   assert.deepEqual(errors, [])
 })
@@ -116,9 +141,9 @@ test('late history reads remain single-flight across navigation and cannot switc
   release.resolve(); await completed
   await page.getByRole('button', { name: 'Work', exact: true }).click()
   assert.match(await page.locator('.chat-thread-header').textContent(), /Alpha website review/)
-  assert.equal(await page.getByText('Earlier Beta evidence', { exact: true }).count(), 0)
+  assert.equal(await page.getByLabel('Conversation transcript', { exact: true }).getByText('Earlier Beta evidence', { exact: true }).count(), 0)
   await betaRoom(rooms).click()
-  await page.getByText('Earlier Beta evidence', { exact: true }).waitFor()
+  await page.getByLabel('Conversation transcript', { exact: true }).getByText('Earlier Beta evidence', { exact: true }).waitFor()
   assert.deepEqual(calls.filter(c => c.path === '/api/conversations/messages').map(c => [c.conversationId, c.before]), [['task:beta', 'beta-recent']])
   assert.equal(calls.some(c => c.body), false)
   assert.deepEqual(errors, [])
@@ -146,7 +171,7 @@ test('failed history reads retain readable room-specific feedback across navigat
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
   assert.equal(await page.locator('vite-error-overlay').count(), 0)
   await page.getByRole('button', { name: 'Load older messages', exact: true }).click()
-  await page.getByText('Earlier Beta evidence', { exact: true }).waitFor()
+  await page.getByLabel('Conversation transcript', { exact: true }).getByText('Earlier Beta evidence', { exact: true }).waitFor()
   assert.equal(await notice.getByRole('alert').count(), 0)
   assert.equal(calls.length, 2)
   assert.equal(calls.some(c => c.body), false)
@@ -162,7 +187,7 @@ test('history from another room cannot be attributed to the selected conversatio
   await page.getByRole('button', { name: 'Load older messages', exact: true }).click()
   await page.getByRole('region', { name: 'History read status', exact: true }).getByRole('alert').waitFor()
   assert.equal(await page.getByText('Wrong room evidence', { exact: true }).count(), 0)
-  assert.equal(await page.getByText('Recent Beta evidence', { exact: true }).isVisible(), true)
+  assert.equal(await page.getByLabel('Conversation transcript', { exact: true }).getByText('Recent Beta evidence', { exact: true }).count(), 1)
   assert.deepEqual(errors, [])
 })
 
@@ -206,7 +231,7 @@ for (const kind of ['tasks', 'messages']) {
     const alert = page.getByRole('region', { name: 'History read status', exact: true }).getByRole('alert')
     await alert.waitFor()
     assert.match(await alert.textContent(), /response did not identify/i)
-    assert.equal(await page.getByText('Recent Beta evidence', { exact: true }).isVisible(), true)
+    assert.equal(await page.getByLabel('Conversation transcript', { exact: true }).getByText('Recent Beta evidence', { exact: true }).count(), 1)
     assert.equal(await betaRoom(rooms).count(), 1)
     assert.equal(calls.length, 1)
     assert.deepEqual(errors, [])
@@ -244,7 +269,7 @@ test('new transcript messages preserve an older reading position until Jump to l
   await scrollTo(transcript, 1800)
   const anchor = await readingAnchor(transcript)
   state.conversations.messages.push(message('alpha', 'alpha-new', 'New Alpha findings'))
-  await page.getByText('New Alpha findings', { exact: true }).waitFor({ state: 'attached' })
+  await page.getByLabel('Conversation transcript', { exact: true }).getByText('New Alpha findings', { exact: true }).waitFor({ state: 'attached' })
   await assertAnchor(transcript, anchor)
   const latest = page.getByRole('button', { name: 'Jump to latest', exact: true })
   await latest.click()
@@ -261,7 +286,7 @@ test('following latest transcript messages never scrolls the surrounding Queue w
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
   assert.equal(await page.locator('.queue-region').evaluate(node => node.scrollTop), 0, 'opening Queue must not jump past its header')
   state.conversations.messages.push(message('alpha', 'alpha-follow', 'Latest Alpha follow-up'))
-  await page.getByText('Latest Alpha follow-up', { exact: true }).waitFor({ state: 'attached' })
+  await page.getByLabel('Conversation transcript', { exact: true }).getByText('Latest Alpha follow-up', { exact: true }).waitFor({ state: 'attached' })
   await page.waitForFunction(() => {
     const node = document.querySelector('.chat-transcript'); return node.scrollHeight - node.scrollTop - node.clientHeight < 2
   })
@@ -300,7 +325,7 @@ test('older messages arriving during reading preserve the visible anchor and exp
   await scrollTo(transcript, 1700)
   const anchor = await readingAnchor(transcript)
   release.resolve()
-  await page.getByText('Archived Alpha evidence 0', { exact: true }).waitFor({ state: 'attached' })
+  await page.getByLabel('Conversation transcript', { exact: true }).getByText('Archived Alpha evidence 0', { exact: true }).waitFor({ state: 'attached' })
   await assertAnchor(transcript, anchor)
   const latest = page.getByRole('button', { name: 'Jump to latest', exact: true })
   await latest.scrollIntoViewIfNeeded()
@@ -339,7 +364,7 @@ test('reading collaboration controls above messages is not displaced by an older
   await scrollTo(transcript, 0)
   assert.equal(await transcript.evaluate(node => node.querySelector('.conversation-message').getBoundingClientRect().top >= node.getBoundingClientRect().bottom), true)
   release.resolve()
-  await page.getByText('Archived before the current evidence', { exact: true }).waitFor({ state: 'attached' })
+  await page.getByLabel('Conversation transcript', { exact: true }).getByText('Archived before the current evidence', { exact: true }).waitFor({ state: 'attached' })
   assert.equal(await transcript.evaluate(node => node.scrollTop), 0)
   assert.deepEqual(errors, [])
 })

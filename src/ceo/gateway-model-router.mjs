@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 import { sha256 } from '../canonical.mjs'
 import { signAction } from '../identity.mjs'
 import { evaluatePolicy } from '../policy.mjs'
-import { createTrustedModelCallNotSentError } from './model-call-errors.mjs'
+import { createTrustedModelCallNotSentError, isTrustedModelCallNotSentError } from './model-call-errors.mjs'
 import { validateModelRouter } from './model-router.mjs'
 
 function isBoundedString(value, maximum = 2048) {
@@ -39,6 +39,7 @@ function deniedModelCall(decision) {
 }
 
 function providerFailure(error) {
+  if (isTrustedModelCallNotSentError(error)) return error
   if (error instanceof Error) {
     const wrapped = new Error(error.message, { cause: error })
     wrapped.name = error.name
@@ -72,7 +73,7 @@ export function createGatewayModelRouter({
     resource,
   })
 
-  function authorize(prompt, context = {}) {
+  function authorize(prompt, context = {}, controls = undefined) {
     const requestHash = sha256({ prompt, context })
     const action = signAction({
       actionId: `model-${crypto.randomUUID()}`,
@@ -106,7 +107,7 @@ export function createGatewayModelRouter({
         if (dispatched) throw new Error('MODEL_CALL_AUTHORIZATION_ALREADY_USED')
         dispatched = true
         try {
-          return await routed.route(prompt, structuredClone(context))
+          return await routed.route(prompt, structuredClone(context), controls)
         } catch (error) {
           throw providerFailure(error)
         }
@@ -118,8 +119,14 @@ export function createGatewayModelRouter({
     routerId: `gateway:${routed.routerId}`,
     authorizationScope,
     authorize,
-    async route(prompt, context = {}) {
-      const authorized = authorize(prompt, context)
+    ...(typeof routed.explain === 'function' ? {
+      // Explanation is a pure, runtime-owned projection. It never authorizes
+      // or dispatches a provider call and therefore stays outside the signed
+      // request/context path.
+      explain: (...args) => routed.explain(...args),
+    } : {}),
+    async route(prompt, context = {}, controls = undefined) {
+      const authorized = authorize(prompt, context, controls)
       return authorized.dispatch()
     },
   }))

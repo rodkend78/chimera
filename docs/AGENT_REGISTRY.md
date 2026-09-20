@@ -25,7 +25,8 @@ production host unless you mean to.
 
 ## Operator flow
 
-1. Open **Agents** and select **Find Hermes agents**. When
+1. Open **Team** for the roster, or **Settings** when configuring connections
+   and imports. Select **Find Hermes agents** in the Settings import panel. When
    `CHIMERA_HERMES_INSTANCE_ID` is set, this pulls profiles from the configured
    host label. There is no default instance id.
 2. Chimera runs one fixed SSM command that lists directory names under the
@@ -44,6 +45,13 @@ production host unless you mean to.
 The discovery preview expires after 15 minutes. Imports must refer to an exact
 candidate in that server-held preview; the API will not accept an invented
 profile ID. Batch imports validate fully before the durable registry changes.
+
+Setup is configuration only: creating a native agent, discovering Hermes
+candidates, importing a profile, or editing metadata does not start a task or a
+worker. A separate explicit task or Ask request is required. The native source
+(`chimera://native/...`) and imported Hermes source (`hermes://...`) remain
+distinct in the roster; an imported profile never becomes a native permission
+grant.
 
 ## Manifest boundary
 

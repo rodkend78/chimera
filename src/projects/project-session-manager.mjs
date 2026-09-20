@@ -3,6 +3,7 @@ import { execFile as execFileCallback } from 'node:child_process'
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
+import { normalizeTaskPlan } from '../ceo/task-plan.mjs'
 
 export const PROJECT_SESSION_SCHEMA = 'chimera.project-session.v1'
 export const PROJECT_SESSION_LEDGER_SCHEMA = 'chimera.project-session-ledger.v1'
@@ -66,13 +67,15 @@ async function git(cwd, args, { allowDiff = false, env = {} } = {}) {
 }
 
 function validatePlan(plan) {
-  let encoded
-  try { encoded = JSON.stringify(plan) } catch { throw new TypeError('PROJECT_SESSION_PLAN_INVALID') }
-  if (!plan || typeof plan !== 'object' || Array.isArray(plan) || !Array.isArray(plan.tasks)
-    || plan.tasks.length < 1 || plan.tasks.length > 8 || Buffer.byteLength(encoded) > 256 * 1024) {
-    throw new TypeError('PROJECT_SESSION_PLAN_INVALID')
+  try {
+    const normalized = normalizeTaskPlan(plan)
+    const encoded = JSON.stringify(normalized)
+    if (Buffer.byteLength(encoded, 'utf8') > 256 * 1024) throw new TypeError('PROJECT_SESSION_PLAN_INVALID')
+    return normalized
+  } catch (error) {
+    if (error?.code === 'PROJECT_SESSION_PLAN_INVALID') throw error
+    throw Object.assign(new TypeError('PROJECT_SESSION_PLAN_INVALID'), { code: 'PROJECT_SESSION_PLAN_INVALID' })
   }
-  return JSON.parse(encoded)
 }
 
 function parseStatus(value) {

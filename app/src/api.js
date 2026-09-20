@@ -11,6 +11,31 @@ function invalidateOperatorSession(expectedToken = csrfToken) {
   operatorExpiresAt = 0
 }
 
+function safeRecovery(value) {
+  const receipt = value && typeof value === 'object' && !Array.isArray(value) ? value : null
+  if (!receipt || typeof receipt.requestId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(receipt.requestId)) return null
+  return {
+    requestId: receipt.requestId,
+    ...(typeof receipt.providerId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(receipt.providerId) ? { providerId: receipt.providerId } : {}),
+    ...(typeof receipt.operation === 'string' && /^[a-z-]{3,32}$/.test(receipt.operation) ? { operation: receipt.operation } : {}),
+    ...(typeof receipt.model === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$/.test(receipt.model) ? { model: receipt.model } : {}),
+    ...(typeof receipt.status === 'string' && ['pending', 'succeeded', 'failed', 'unknown'].includes(receipt.status) ? { status: receipt.status } : {}),
+  }
+}
+
+function typedApiError(message, { status = null, body = null, ambiguous = false } = {}) {
+  const error = new Error(message)
+  error.name = 'ChimeraApiError'
+  error.code = typeof body?.error === 'string' ? body.error : message
+  error.status = status
+  error.ambiguous = ambiguous
+  error.reconciliationRequired = body?.reconciliationRequired === true
+  error.retryAllowed = body?.retryAllowed === true
+  const receipt = safeRecovery(body?.receipt)
+  if (receipt) error.receipt = receipt
+  return error
+}
+
 async function sessionResponse(response) {
   const body = await response.json()
   if (!response.ok || typeof body.csrfToken !== 'string' || !body.csrfToken) {
@@ -97,7 +122,8 @@ export async function api(path, options = {}) {
       body = String(options.method ?? 'GET').toUpperCase() === 'HEAD' ? {} : await response.json()
     } catch (error) {
       invalidateOperatorSession(requestToken)
-      throw error
+      if (error?.name === 'ChimeraApiError') throw error
+      throw typedApiError(error?.message ?? 'API_RESPONSE_UNAVAILABLE', { status: response?.status ?? null, ambiguous: !safeRead })
     }
     if (response.ok) return body
     const authRejected = (response.status === 401 && body.error === 'OPERATOR_AUTH_REQUIRED')
@@ -106,7 +132,11 @@ export async function api(path, options = {}) {
       invalidateOperatorSession(requestToken)
       if (safeRead && attempt === 0) continue
     }
-    throw new Error(body.error ?? `Request failed with ${response.status}`)
+    throw typedApiError(body.error ?? `Request failed with ${response.status}`, {
+      status: response.status,
+      body,
+      ambiguous: body?.reconciliationRequired === true || (!safeRead && response.status >= 500),
+    })
   }
 }
 

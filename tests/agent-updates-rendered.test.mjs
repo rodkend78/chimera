@@ -22,7 +22,8 @@ async function fixture(t, handle) {
     agents: { main: { agentId: 'ceo', displayName: 'RJ', access }, accessProfiles: [access],
       specialists: ['ace', 'iris'].map(agentId => ({ agentId, displayName: agentId === 'ace' ? 'Ace' : 'Iris', role: 'Specialist',
         capabilities: ['general'], status: 'Ready', harnessState: 'Registered', access, modelPreference: { mode: 'auto' },
-        source: { type: 'hermes', ref: `hermes://fixture/${agentId}` } })) },
+        source: { type: 'hermes', ref: `hermes://fixture/${agentId}` },
+        executor: { kind: 'runtime-task-harness', requiresTask: true } })) },
     conversations: { channels: [], messages: [] }, tasks: [], projects: { projects: [], sessions: [], leases: [] },
   }
   page.on('pageerror', e => errors.push(e.message))
@@ -51,6 +52,50 @@ async function roundTrip(page) {
   await page.getByRole('button', { name: 'Work', exact: true }).click()
   await page.getByRole('button', { name: 'Team', exact: true }).click()
 }
+
+test('catalog-only conversation selection is non-invoking and never falls through to an access probe', { timeout: 20000 }, async t => {
+  let seeded = false
+  const { page, calls, errors } = await fixture(t, async ({ path, body, route, state }) => {
+    if (path === '/api/state' && !seeded) {
+      seeded = true
+      state.models.providers.push({
+        id: 'aws-bedrock',
+        name: 'AWS Bedrock',
+        configured: true,
+        region: 'us-west-2',
+        models: [{ id: 'catalog-only-conversation', name: 'Catalog-only conversation', endpoint: 'bedrock-runtime', availability: 'catalog-only', capabilities: ['conversation'] }],
+      })
+    }
+    if (path === '/api/models/select') {
+      state.models.selected = { providerId: body.providerId, model: body.model }
+      await route.fulfill({ json: { selected: state.models.selected } })
+      return true
+    }
+    if (path === '/api/models/check') {
+      await route.fulfill({ status: 500, json: { error: 'UNEXPECTED_ACCESS_PROBE' } })
+      return true
+    }
+    return false
+  })
+  const externalRequests = []
+  page.on('request', request => {
+    const url = new URL(request.url())
+    if (url.protocol.startsWith('http') && url.hostname !== '127.0.0.1') externalRequests.push(request.url())
+  })
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor()
+  await page.getByText('Advanced model catalog', { exact: true }).click()
+  const selectResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/models/select')
+  await page.getByRole('button', { name: 'Select model', exact: true }).click()
+  await selectResponse
+  assert.deepEqual(calls.filter(call => call.path === '/api/models/select'), [{
+    path: '/api/models/select',
+    body: { providerId: 'aws-bedrock', model: 'catalog-only-conversation' },
+  }])
+  assert.deepEqual(calls.filter(call => call.path === '/api/models/check'), [])
+  assert.deepEqual(externalRequests, [])
+  assert.deepEqual(errors, [])
+})
 
 function deferred() {
   let resolve
@@ -217,6 +262,7 @@ for (const [harnessState, label, action] of [['Built in', 'Start worker', 'start
     const { page, calls, errors } = await fixture(t, async ({ path, route, state }) => {
       if (path === '/api/state') {
         state.agents.specialists[0].source.type = 'chimera'
+        state.agents.specialists[0].executor = null
         state.agents.specialists[0].harnessState = harnessState
       }
       if (path !== `/api/agents/workers/${action}`) return false

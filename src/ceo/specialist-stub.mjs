@@ -73,6 +73,7 @@ export class SignedSpecialistStub {
         agentId: this.agentId,
         ...envelope.payload.request,
         taskId: envelope.payload.taskId,
+        nodeId: envelope.payload.nodeId ?? null,
         sourceMessageId: envelope.payload.messageId,
         ...actionWindow(this.grant, this.now()),
       }, this.identity)
@@ -106,6 +107,7 @@ export class SignedSpecialistStub {
       messageId: `result-${crypto.randomUUID()}`,
       type: 'structured_result',
       taskId: envelope.payload.taskId,
+      nodeId: envelope.payload.nodeId ?? null,
       parentMessageId: envelope.payload.messageId,
       ...messageWindow,
       content: redactSensitiveData({
@@ -123,6 +125,7 @@ export class SignedSpecialistStub {
       messageId: resultEnvelope.payload.messageId,
       messageHash: sha256(resultEnvelope),
       taskId: envelope.payload.taskId,
+      nodeId: envelope.payload.nodeId ?? null,
       ...messageWindow,
     }, this.identity)
     const messageDecision = this.gateway.submit({ grant: this.grant, action: messageAction })
@@ -144,6 +147,6 @@ export class SignedSpecialistStub {
       gatewayActionId: messageDecision.actionId,
       at: new Date(this.now()).toISOString(),
     })
-    return { status: 'completed', envelope: resultEnvelope, actionDecision }
+    return { status: 'completed', envelope: resultEnvelope, actionDecision, nodeId: envelope.payload.nodeId ?? null }
   }
 }

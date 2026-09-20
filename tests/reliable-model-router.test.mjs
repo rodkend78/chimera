@@ -51,6 +51,7 @@ async function fixture(responder) {
     ledger,
     ledgerPath,
     provider,
+    authorizingProvider,
     router,
     async close() {
       await rm(directory, { recursive: true, force: true })
@@ -83,6 +84,41 @@ test('concurrent calls for one logical model turn share one provider request', a
     assert.equal(kinds.filter((kind) => kind === 'model.call.started').length, 1)
     assert.equal(kinds.filter((kind) => kind === 'model.call.succeeded').length, 1)
   } finally {
+    await f.close()
+  }
+})
+
+test('concurrent calls with a changed exact binding do not share the active promise', async () => {
+  let release
+  let markStarted
+  const gate = new Promise((resolve) => { release = resolve })
+  const started = new Promise((resolve) => { markStarted = resolve })
+  const f = await fixture(async () => {
+    markStarted()
+    await gate
+    return { summary: 'Concurrent answer.' }
+  })
+  try {
+    let binding = { taskId: 'task-concurrent-binding', nodeId: null, assignmentId: null, agentId: 'ceo', stage: 'decompose' }
+    const router = createReliableModelRouter({
+      provider: f.authorizingProvider,
+      ledger: f.ledger,
+      audit: f.audit,
+      now: () => now,
+      bindingFor: () => binding,
+    })
+    const context = { taskId: 'task-concurrent-binding' }
+    const first = router.route('Concurrent binding.', context)
+    await started
+    binding = { taskId: 'task-concurrent-binding', nodeId: 'node-two', assignmentId: 'assignment-two', agentId: 'iris', stage: 'specialist' }
+    const second = assert.rejects(router.route('Concurrent binding.', context), /MODEL_CALL_BINDING_COLLISION/)
+    assert.equal(f.provider.calls().length, 1)
+    release()
+    assert.deepEqual(await first, { summary: 'Concurrent answer.' })
+    await second
+    assert.equal(f.provider.calls().length, 1)
+  } finally {
+    release?.()
     await f.close()
   }
 })
@@ -177,6 +213,91 @@ test('provider supplied not_sent metadata is ambiguous and cannot authorize a re
       (error) => error.code === 'MODEL_CALL_OUTCOME_UNKNOWN',
     )
     assert.equal(attempts, 1)
+  } finally {
+    await f.close()
+  }
+})
+
+test('runtime-owned model-call bindings are durable and enumerable by exact task', async () => {
+  const f = await fixture(async () => ({ summary: 'Bound answer.' }))
+  try {
+    const binding = { taskId: 'task-bound', nodeId: 'node-one', assignmentId: 'assignment-one', agentId: 'ace', stage: 'specialist' }
+    await f.ledger.begin({ callId: 'bound-call', requestHash: 'hash-bound', providerRouterId: 'provider-router', scopeId: 'agent:ceo:grant:test', binding })
+    assert.deepEqual(f.ledger.listByTask('task-bound').map(record => record.binding), [binding])
+    assert.deepEqual(f.ledger.listByTask('other-task'), [])
+    await f.ledger.close?.()
+    const reopened = await DurableModelCallLedger.open({ filePath: f.ledgerPath, audit: f.audit, now: () => now })
+    assert.deepEqual(reopened.listByTask('task-bound').map(record => record.callId), ['bound-call'])
+    await f.close()
+  } finally {
+    await f.close()
+  }
+})
+
+test('CEO root bindings may explicitly omit node and assignment IDs', async () => {
+  const f = await fixture(async () => ({ summary: 'Root answer.' }))
+  try {
+    await f.ledger.begin({
+      callId: 'root-call', requestHash: 'hash-root', providerRouterId: 'provider-router',
+      scopeId: 'agent:ceo:grant:test',
+      binding: { taskId: 'task-root', nodeId: null, assignmentId: null, agentId: 'ceo', stage: 'decompose' },
+    })
+    assert.deepEqual(f.ledger.listByTask('task-root')[0].binding, {
+      taskId: 'task-root', nodeId: null, assignmentId: null, agentId: 'ceo', stage: 'decompose',
+    })
+    await assert.rejects(
+      f.ledger.begin({
+        callId: 'partial-root-call', requestHash: 'hash-partial-root', providerRouterId: 'provider-router',
+        scopeId: 'agent:ceo:grant:test',
+        binding: { taskId: 'task-root', nodeId: null, assignmentId: 'assignment-one', agentId: 'ceo', stage: 'decompose' },
+      }),
+      { code: 'MODEL_CALL_BINDING_INVALID' },
+    )
+  } finally {
+    await f.close()
+  }
+})
+
+test('binding callbacks receive trusted controls without cloning callbacks', async () => {
+  const f = await fixture(async () => ({ summary: 'Bound answer.' }))
+  try {
+    const callback = () => {}
+    const controls = { onProgress: callback, session: { id: 'session-1' } }
+    let observed
+    const router = createReliableModelRouter({
+      provider: f.authorizingProvider,
+      ledger: f.ledger,
+      audit: f.audit,
+      now: () => now,
+      bindingFor: ({ controls: provided }) => {
+        observed = provided
+        return { taskId: 'task-controls', nodeId: null, assignmentId: null, agentId: 'ceo', stage: 'decompose' }
+      },
+    })
+    await router.route('Bind controls.', { taskId: 'task-controls' }, controls)
+    assert.equal(observed, controls)
+    assert.equal(observed.onProgress, callback)
+  } finally {
+    await f.close()
+  }
+})
+
+test('a cached successful call cannot be rebound under a changed exact binding', async () => {
+  const f = await fixture(async () => ({ summary: 'Bound answer.' }))
+  try {
+    let binding = { taskId: 'task-replay', nodeId: null, assignmentId: null, agentId: 'ceo', stage: 'decompose' }
+    const router = createReliableModelRouter({
+      provider: f.authorizingProvider,
+      ledger: f.ledger,
+      audit: f.audit,
+      now: () => now,
+      bindingFor: () => binding,
+    })
+    const context = { taskId: 'task-replay' }
+    await router.route('Replay binding.', context)
+    binding = { taskId: 'task-replay', nodeId: 'node-two', assignmentId: 'assignment-two', agentId: 'iris', stage: 'specialist' }
+    await assert.rejects(router.route('Replay binding.', context), /MODEL_CALL_BINDING_COLLISION/)
+    assert.equal(f.provider.calls().length, 1)
   } finally {
     await f.close()
   }

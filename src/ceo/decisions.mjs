@@ -26,10 +26,23 @@ function validateDecisionRequest(decision) {
     || !isRecord(decision.policyRationale)
     || !isBoundedString(decision.policyRationale.ruleId, 256)
     || decision.policyRationale.tier !== 'confirm'
-    || !isBoundedString(decision.policyRationale.reason, 2048)) {
+    || !isBoundedString(decision.policyRationale.reason, 2048)
+    || (decision.taskId !== undefined && decision.taskId !== null && !isBoundedString(decision.taskId, 256))
+    || (decision.nodeId !== undefined && decision.nodeId !== null && !isBoundedString(decision.nodeId, 128))
+    || (decision.assignmentId !== undefined && decision.assignmentId !== null && !isBoundedString(decision.assignmentId, 256))
+    || (decision.canonicalAssignmentId !== undefined && decision.canonicalAssignmentId !== null && !isBoundedString(decision.canonicalAssignmentId, 256))
+    || (decision.nodeId !== undefined && decision.nodeId !== null && (decision.taskId === undefined || decision.taskId === null))
+    || (decision.assignmentId !== undefined && decision.assignmentId !== null && (decision.taskId === undefined || decision.taskId === null))
+    || (decision.canonicalAssignmentId !== undefined && decision.canonicalAssignmentId !== null && (decision.taskId === undefined || decision.taskId === null))) {
     throw new TypeError('invalid decision request')
   }
-  return decision
+  return {
+    ...decision,
+    taskId: decision.taskId ?? null,
+    nodeId: decision.nodeId ?? null,
+    assignmentId: decision.assignmentId ?? null,
+    canonicalAssignmentId: decision.canonicalAssignmentId ?? null,
+  }
 }
 
 export class DurableDecisionQueue {
@@ -76,6 +89,10 @@ export class DurableDecisionQueue {
       agentId: record.agent.agentId,
       grantId: record.agent.grantId,
       resource: record.resource,
+      ...(record.taskId ? { taskId: record.taskId } : {}),
+      ...(record.nodeId ? { nodeId: record.nodeId } : {}),
+      ...(record.assignmentId ? { assignmentId: record.assignmentId } : {}),
+      ...(record.canonicalAssignmentId ? { canonicalAssignmentId: record.canonicalAssignmentId } : {}),
       expiresAt: record.expiresAt,
       policyRuleId: record.policyRationale.ruleId,
       tier: record.policyRationale.tier,
@@ -189,13 +206,18 @@ export class DurableDecisionQueue {
       throw new TypeError('invalid decision queue event')
     }
     if (event.event === 'posted') {
-      validateDecisionRequest(event.decision)
-      this.#records.set(event.decision.actionId, structuredClone(event.decision))
+      const decision = structuredClone(validateDecisionRequest(event.decision))
+      if (decision.schema !== DECISION_QUEUE_SCHEMA || decision.status !== 'pending' || !isBoundedString(decision.postedAt, 64)) {
+        throw new TypeError('invalid decision post')
+      }
+      this.#records.set(decision.actionId, decision)
       return
     }
     if (event.event === 'resolved') {
       const current = this.#records.get(event.actionId)
       if (!current) throw new TypeError('decision resolution precedes request')
+      if (!['approved', 'denied'].includes(event.status)
+        || !['approve', 'deny'].includes(event.outcome)) throw new TypeError('invalid decision resolution')
       this.#records.set(event.actionId, {
         ...current,
         status: event.status,

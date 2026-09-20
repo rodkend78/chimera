@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { handleCodexAuthRequest } from './auth-api.mjs'
 import { handleAntigravityRequest } from './antigravity-api.mjs'
+import { handleConnectionsRequest } from './connections-api.mjs'
 import { handleRjAwsRequest } from './rj-aws-api.mjs'
 import { assertLoopbackHost, corsAllowOrigin, isAllowedRequestOrigin, resolveAppAsset } from './http-safety.mjs'
 import { authorizeOperatorRequest, authorizeOperatorWebSocket } from './operator-http-auth.mjs'
@@ -13,6 +14,7 @@ import { OperatorSessionManager } from './operator-session.mjs'
 import { ChimeraBrowserRuntime } from './runtime.mjs'
 import { createLatestFrameSender } from './executor.mjs'
 import { handleTaskMessageRequest } from './task-message-api.mjs'
+import { handleTaskWorkspaceRequest } from './task-workspace-api.mjs'
 import { createAccountBrowserLauncher } from './account-browser-launcher.mjs'
 import { handleAccountBrowserRequest } from './account-browser-api.mjs'
 import { handleAccountCompanionRequest } from './account-companion-api.mjs'
@@ -22,6 +24,7 @@ import { ClientIntakeService } from '../clients/intake-service.mjs'
 import { GoogleConnection } from '../clients/google-connection.mjs'
 import { GoogleIntake } from '../clients/google-intake.mjs'
 import { handleClientIntakeRequest, clientDirectoryAdapter } from './client-intake-api.mjs'
+import { handleAgentRequest } from './agent-api-handler.mjs'
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url))
 const APP_DIST = join(ROOT, 'app/dist')
@@ -127,6 +130,8 @@ const server = createServer(async (request, response) => {
     if (intakeResult) return replyJson(intakeResult.status, intakeResult.body)
     const clientWorkspaceResult = await handleClientWorkspaceRequest({ pathname: url.pathname, request, store: clientDirectory, operatorSessions })
     if (clientWorkspaceResult) return replyJson(clientWorkspaceResult.status, clientWorkspaceResult.body)
+    const taskWorkspaceResult = await handleTaskWorkspaceRequest({ pathname: url.pathname, request, runtime, operatorSessions })
+    if (taskWorkspaceResult) return replyJson(taskWorkspaceResult.status, taskWorkspaceResult.body)
     if (url.pathname === '/api/operator/session' && request.method === 'GET') {
       return replyJson(200, operatorSessions.issueCsrf())
     }
@@ -138,7 +143,10 @@ const server = createServer(async (request, response) => {
     })
     if (accountResult) return replyJson(accountResult.status, accountResult.body)
     const companionResult = await handleAccountCompanionRequest({ pathname: url.pathname, request, operatorSessions, companion: runtime.accountCompanion })
-    if (companionResult) return replyJson(companionResult.status, companionResult.body)
+    if (companionResult) {
+      if (Array.isArray(companionResult.body?.leases)) runtime.taskWorkspaceBrowserBindings = structuredClone(companionResult.body.leases)
+      return replyJson(companionResult.status, companionResult.body)
+    }
     if (url.pathname === '/api/tasks/message') {
       const result = await handleTaskMessageRequest({ request, runtime, operatorSessions })
       return replyJson(result.status, result.body)
@@ -149,10 +157,22 @@ const server = createServer(async (request, response) => {
       runtime,
     })
     if (authResult) return replyJson( authResult.status, authResult.body)
-    const antigravityResult = await handleAntigravityRequest({ pathname: url.pathname, request, operatorSessions, connection: runtime.antigravity })
+    const antigravityResult = await handleAntigravityRequest({ pathname: url.pathname, request, operatorSessions,
+      connection: runtime.antigravity,
+      state: runtime.antigravity.state.bind(runtime.antigravity),
+      refresh: () => runtime.refreshAntigravity() })
     if (antigravityResult) return replyJson(antigravityResult.status, antigravityResult.body)
+    const connectionsResult = await handleConnectionsRequest({
+      pathname: url.pathname,
+      request,
+      operatorSessions,
+      service: runtime.connectionService,
+    })
+    if (connectionsResult) return replyJson(connectionsResult.status, connectionsResult.body)
     const rjAwsResult = await handleRjAwsRequest({ pathname: url.pathname, request, operatorSessions, runtime })
     if (rjAwsResult) return replyJson(rjAwsResult.status, rjAwsResult.body)
+    const agentResult = await handleAgentRequest({ pathname: url.pathname, request, operatorSessions, runtime })
+    if (agentResult) return replyJson(agentResult.status, agentResult.body)
     if (url.pathname === '/api/state' && request.method === 'GET') return replyJson( 200, await runtime.state())
     if (url.pathname === '/api/models' && request.method === 'GET') return replyJson( 200, runtime.modelState())
     if (url.pathname === '/api/models/check' && request.method === 'POST') return replyJson( 200, await runtime.checkModelAccess(await bodyOf(request)))
@@ -195,7 +215,17 @@ const server = createServer(async (request, response) => {
     if (url.pathname === '/api/projects/review' && request.method === 'POST') return replyJson( 200, await runtime.projectReview((await bodyOf(request)).taskId))
     if (url.pathname === '/api/projects/commit' && request.method === 'POST') return replyJson( 200, await runtime.commitProjectSession(await bodyOf(request)))
     if (url.pathname === '/api/tasks' && request.method === 'GET') return replyJson(200, runtime.taskHistory({ limit: Number(url.searchParams.get('limit') ?? 50), before: url.searchParams.get('before') }))
+    if (url.pathname.startsWith('/api/tasks/receipts/') && request.method === 'GET') {
+      const requestId = decodeURIComponent(url.pathname.slice('/api/tasks/receipts/'.length))
+      const result = runtime.taskAdmissionStatus(requestId)
+      return result ? replyJson(200, result) : replyJson(404, { error: 'TASK_ADMISSION_NOT_FOUND' })
+    }
     if (url.pathname === '/api/conversations/messages' && request.method === 'GET') return replyJson(200, runtime.conversationHistory({ conversationId: url.searchParams.get('conversationId') ?? 'main', limit: Number(url.searchParams.get('limit') ?? 100), before: url.searchParams.get('before') }))
+    if (url.pathname.startsWith('/api/conversations/asks/') && request.method === 'GET') {
+      const requestId = decodeURIComponent(url.pathname.slice('/api/conversations/asks/'.length))
+      const result = await runtime.askStatus(requestId)
+      return result ? replyJson(200, result) : replyJson(404, { error: 'ASK_NOT_FOUND' })
+    }
     if (url.pathname === '/api/tasks' && request.method === 'POST') return replyJson( 202, await runtime.submitTask(await bodyOf(request)))
     if (url.pathname === '/api/tasks/steer' && request.method === 'POST') return replyJson(200, await runtime.steerTask(await bodyOf(request)))
     if (url.pathname === '/api/tasks/cancel' && request.method === 'POST') return replyJson(200, await runtime.cancelTask(await bodyOf(request)))
@@ -208,6 +238,7 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname === '/api/browser/files' && request.method === 'GET') return replyJson(200, await runtime.browserAdapter.humanFileState())
     if (url.pathname === '/api/conversations/messages' && request.method === 'POST') return replyJson( 202, await runtime.sendMessage(await bodyOf(request)))
+    if (url.pathname === '/api/conversations/ask' && request.method === 'POST') return replyJson(200, await runtime.ask(await bodyOf(request)))
     if (url.pathname === '/api/control/take' && request.method === 'POST') return replyJson( 200, runtime.takeControl())
     if (url.pathname === '/api/control/release' && request.method === 'POST') return replyJson( 200, runtime.releaseControl())
     if (url.pathname === '/api/browser/agent' && request.method === 'POST') return replyJson( 200, await runtime.agentCommand(await bodyOf(request)))
@@ -223,10 +254,13 @@ const server = createServer(async (request, response) => {
     return serveApp(url.pathname, response)
   } catch (error) {
     const code = publicErrorCode(error)
-    const status = code === 'REQUEST_TOO_LARGE' ? 413
-      : ['TASK_NOT_FOUND', 'PROJECT_NOT_FOUND'].includes(code) ? 404
-        : ['TASK_NOT_ACTIVE', 'TASK_NOT_TERMINAL', 'TASK_NOT_QUEUED', 'TASK_ALREADY_RUNNING', 'TASK_EXECUTION_BUSY', 'TASK_QUEUE_FULL', 'TASK_QUEUE_CLEANUP_REQUIRED', 'TASK_QUEUE_RESUME_REQUIRED'].includes(code) ? 409
-          : error instanceof SyntaxError || /^(TASK_STEERING_INVALID|AGENT_LOOP_BOUND_INVALID|HISTORY_PAGE_INVALID|CONVERSATION_.*INVALID|TASK_LIST_.*INVALID)$/.test(code) ? 400 : 500
+    const status = ['REQUEST_TOO_LARGE', 'NATIVE_PERSONA_TOO_LARGE'].includes(code) ? 413
+          : ['TASK_NOT_FOUND', 'PROJECT_NOT_FOUND', 'TASK_ADMISSION_NOT_FOUND'].includes(code) ? 404
+        : ['TASK_NOT_ACTIVE', 'TASK_NOT_TERMINAL', 'TASK_NOT_QUEUED', 'TASK_ALREADY_RUNNING', 'TASK_EXECUTION_BUSY', 'TASK_QUEUE_FULL', 'TASK_QUEUE_CLEANUP_REQUIRED', 'TASK_QUEUE_RESUME_REQUIRED', 'TASK_ADMISSION_CONFLICT', 'TASK_ADMISSION_TERMINAL', 'TASK_DESTINATION_STALE'].includes(code) ? 409
+          : ['ASK_REQUEST_INVALID', 'ASK_CONTEXT_INVALID', 'ASK_CONTINUITY_INVALID', 'ASK_CONTINUITY_INCOMPLETE', 'ASK_CONTINUITY_TOO_LARGE', 'ASK_EXECUTOR_NOT_PURE', 'ASK_RESULT_INVALID', 'AGENT_CREATE_REQUEST_INVALID', 'AGENT_CREATE_RECEIPT_INVALID', 'AGENT_METADATA_INPUT_INVALID', 'AGENT_METADATA_ACTOR_INVALID', 'AGENT_PERSONA_ACTOR_INVALID', 'AGENT_CONTINUITY_REPAIR_INPUT_INVALID', 'AGENT_IMPORT_INVALID', 'AGENT_DISCOVERY_INVALID', 'AGENT_DISCOVERY_SOURCE_UNAVAILABLE', 'AGENT_DISCOVERY_CANDIDATE_INVALID', 'AGENT_DISPLAY_NAME_INVALID', 'HERMES_AGENT_CANDIDATE_INVALID', 'NATIVE_PERSONA_CONTENT_INVALID', 'NATIVE_AGENT_ID_INVALID', 'TASK_ADMISSION_INVALID', 'TASK_DESTINATION_REVISION_INVALID', 'TASK_REQUIREMENTS_INPUT_INVALID', 'TASK_REQUIREMENTS_SCHEMA_INVALID', 'TASK_REQUIREMENTS_FIELD_INVALID', 'TASK_REQUIREMENTS_VALUE_INVALID', 'TASK_WORKSPACE_INVALID', 'TASK_WORKSPACE_MISMATCH', 'MODEL_SELECTION_INVALID', 'NO_ELIGIBLE_MODEL_ROUTE'].includes(code)
+            || error instanceof SyntaxError || /^(TASK_STEERING_INVALID|AGENT_LOOP_BOUND_INVALID|HISTORY_PAGE_INVALID|CONVERSATION_.*INVALID|TASK_LIST_.*INVALID)$/.test(code) ? 400
+          : ['ASK_REQUEST_CONFLICT', 'ASK_CONVERSATION_MISMATCH', 'ASK_CONTINUITY_UNAVAILABLE', 'ASK_CONTINUITY_STALE', 'ASK_OUTCOME_UNKNOWN', 'AGENT_CREATE_REQUEST_CONFLICT', 'AGENT_ALREADY_REGISTERED', 'AGENT_NATIVE_ID_RESERVED', 'AGENT_DISCOVERY_EXPIRED', 'AGENT_DISCOVERY_CANDIDATE_INVALID', 'AGENT_RESERVED_FOR_MAIN_PERSONA', 'AGENT_METADATA_CHANGE_DURING_TASK', 'AGENT_CONTINUITY_REPAIR_DURING_TASK', 'AGENT_IMPORT_DURING_TASK', 'AGENT_MUTATION_IN_PROGRESS'].includes(code) ? 409
+          : ['ASK_NOT_FOUND', 'ASK_REQUEST_NOT_FOUND', 'ASK_RECIPIENT_NOT_REGISTERED', 'AGENT_NOT_REGISTERED'].includes(code) ? 404 : 500
     return replyJson(status, { error: code })
   }
 })

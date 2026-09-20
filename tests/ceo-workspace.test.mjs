@@ -377,3 +377,99 @@ test('activity projection exposes real audit events, agent activity, decisions, 
     await f.close()
   }
 })
+
+test('invalid task graphs stop before plan publication or dispatch', async () => {
+  const f = await fixture()
+  try {
+    let dispatches = 0
+    f.workspace.modelRouter = createDeterministicModelRouter({
+      routerId: 'invalid-graph',
+      responder: async (_prompt, context) => context.stage === 'decompose'
+        ? {
+            tasks: [
+              { nodeId: 'one', specialistAgentId: 'researcher', objective: 'One.', acceptanceCriteria: ['One.'], dependsOn: ['two'] },
+              { nodeId: 'two', specialistAgentId: 'researcher', objective: 'Two.', acceptanceCriteria: ['Two.'], dependsOn: ['one'] },
+            ],
+          }
+        : { summary: 'Should not synthesize.' },
+    })
+    f.workspace.onPlan = async () => { throw new Error('PLAN_BARRIER_BROKEN') }
+    f.workspace.dispatchTask = async () => { dispatches += 1; throw new Error('DISPATCH_BARRIER_BROKEN') }
+    await assert.rejects(
+      f.workspace.receive({ envelope: f.inbound(), senderGrant: f.operatorGrant }),
+      { code: 'TASK_PLAN_CYCLE' },
+    )
+    assert.equal(dispatches, 0)
+  } finally {
+    await f.close()
+  }
+})
+
+test('identified graph dependencies control sequential compatibility dispatch order', async () => {
+  const f = await fixture()
+  try {
+    const events = []
+    f.workspace.modelRouter = createDeterministicModelRouter({
+      routerId: 'ordered-graph',
+      responder: async (_prompt, context) => context.stage === 'decompose'
+        ? {
+            tasks: [
+              { nodeId: 'publish', specialistAgentId: 'researcher', objective: 'Publish.', acceptanceCriteria: ['Published.'], dependsOn: ['research'] },
+              { nodeId: 'research', specialistAgentId: 'researcher', objective: 'Research.', acceptanceCriteria: ['Facts.'], dependsOn: [] },
+            ],
+          }
+        : { summary: 'Ordered.' },
+    })
+    f.workspace.onPlan = async () => { events.push('plan') }
+    f.workspace.dispatchTask = async (input) => {
+      events.push(`dispatch:${input.nodeId}`)
+      return { status: 'completed', specialistAgentId: input.specialistAgentId, taskId: input.taskId, nodeId: input.nodeId,
+        assignmentMessageId: `handoff-${input.nodeId}`, messageId: `result-${input.nodeId}`, resultId: `result-${input.nodeId}`,
+        summary: input.objective, result: {} }
+    }
+    const result = await f.workspace.receive({ envelope: f.inbound(), senderGrant: f.operatorGrant })
+    assert.equal(result.status, 'completed')
+    assert.deepEqual(events, ['plan', 'dispatch:research', 'dispatch:publish'])
+  } finally {
+    await f.close()
+  }
+})
+
+test('workspace selects graph dispatch only for fully identified plans and preserves legacy dispatch', async () => {
+  const graph = await fixture()
+  const legacy = await fixture()
+  try {
+    const graphCalls = []
+    graph.workspace.modelRouter = createDeterministicModelRouter({
+      routerId: 'graph-dispatch',
+      responder: async (_prompt, context) => context.stage === 'decompose'
+        ? { tasks: [{ nodeId: 'identified', specialistAgentId: 'researcher', objective: 'Graph.', acceptanceCriteria: ['Graph.'], dependsOn: [] }] }
+        : { summary: 'Graph synthesis.' },
+    })
+    graph.workspace.dispatchTask = async () => { throw new Error('LEGACY_PATH_USED') }
+    graph.workspace.dispatchPlan = async input => {
+      graphCalls.push(input)
+      return [{ status: 'succeeded', specialistAgentId: 'researcher', taskId: 'graph-task', nodeId: 'identified',
+        assignmentMessageId: 'handoff-identified', messageId: 'result-identified', resultId: 'result-identified',
+        summary: 'Graph result.', result: {} }]
+    }
+    const graphResult = await graph.workspace.receive({ envelope: graph.inbound(), senderGrant: graph.operatorGrant })
+    assert.equal(graphResult.status, 'completed')
+    assert.equal(graphCalls.length, 1)
+    assert.equal(graphCalls[0].tasks[0].nodeId, 'identified')
+
+    const legacyCalls = []
+    legacy.workspace.dispatchPlan = async () => { throw new Error('GRAPH_PATH_USED_FOR_LEGACY') }
+    legacy.workspace.dispatchTask = async input => {
+      legacyCalls.push(input)
+      return { status: 'succeeded', specialistAgentId: input.specialistAgentId, taskId: input.taskId, nodeId: input.nodeId,
+        assignmentMessageId: 'handoff-legacy', messageId: 'result-legacy', resultId: 'result-legacy', summary: 'Legacy result.', result: {} }
+    }
+    const legacyResult = await legacy.workspace.receive({ envelope: legacy.inbound(), senderGrant: legacy.operatorGrant })
+    assert.equal(legacyResult.status, 'completed')
+    assert.equal(legacyCalls.length, 1)
+  } finally {
+    await graph.close()
+    await legacy.close()
+  }
+})

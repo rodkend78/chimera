@@ -203,6 +203,7 @@ export function createMantleModelRouter({
       providerId: 'aws-bedrock-mantle',
       model: modelId,
       protocol: 'openai-chat-completions',
+      execution: 'inference-only',
       region,
       project,
     }),

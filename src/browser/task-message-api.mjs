@@ -15,10 +15,12 @@ export async function handleTaskMessageRequest({ request, runtime, operatorSessi
     }
     const input = JSON.parse(Buffer.concat(chunks).toString('utf8'))
     if (!input || typeof input !== 'object' || Array.isArray(input)) return { status: 400, body: { error: 'TASK_MESSAGE_INVALID' } }
+    const allowed = new Set(['taskId', 'recipientAgentIds', 'content', 'replyTo', 'requestId', 'expectedDestinationRevision'])
+    if (Object.keys(input).some(key => !allowed.has(key))) return { status: 400, body: { error: 'TASK_MESSAGE_INVALID' } }
     return { status: 200, body: await runtime.messageTask(input) }
   } catch (error) {
     const code = typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{2,127}$/.test(error.code) ? error.code : 'INTERNAL_ERROR'
-    return { status: error instanceof SyntaxError || code.startsWith('TASK_MESSAGE_') ? 400 : code === 'TASK_NOT_FOUND' ? 404 : code === 'TASK_NOT_ACTIVE' ? 409 : 500,
+    return { status: error instanceof SyntaxError || code.startsWith('TASK_MESSAGE_') || ['TASK_ADMISSION_INVALID', 'TASK_DESTINATION_REVISION_INVALID'].includes(code) ? 400 : code === 'TASK_NOT_FOUND' ? 404 : ['TASK_NOT_ACTIVE', 'TASK_ADMISSION_CONFLICT', 'TASK_ADMISSION_TERMINAL', 'TASK_DESTINATION_STALE'].includes(code) ? 409 : 500,
       body: { error: error instanceof SyntaxError ? 'TASK_MESSAGE_INVALID' : code } }
   }
 }

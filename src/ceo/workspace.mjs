@@ -6,8 +6,7 @@ import { evaluatePolicy } from '../policy.mjs'
 import { createEd25519SigningProvider } from '../signing-provider.mjs'
 import { createActivityProjection } from './activity-projection.mjs'
 import { validateModelRouter } from './model-router.mjs'
-
-const MAX_SPECIALIST_TASKS = 8
+import { TASK_PLAN_SCHEMA, normalizeTaskPlan } from './task-plan.mjs'
 
 function isRecord(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -44,15 +43,13 @@ function validateTask(task) {
   return task
 }
 
-function validatePlan(plan) {
-  if (!isRecord(plan)
-    || !Array.isArray(plan.tasks)
-    || plan.tasks.length === 0
-    || plan.tasks.length > MAX_SPECIALIST_TASKS) {
+function validatePlan(plan, eligibleAgentIds) {
+  try {
+    return normalizeTaskPlan(plan, { eligibleAgentIds })
+  } catch (error) {
+    if (error?.code) throw error
     throw new TypeError('model router returned an invalid task plan')
   }
-  plan.tasks.forEach(validateTask)
-  return plan
 }
 
 function validateSynthesis(synthesis) {
@@ -87,6 +84,8 @@ export class CeoWorkspace {
     specialistCatalog = [],
     resolveSpecialist = null,
     dispatchTask = null,
+    dispatchPlan = null,
+    resolveResources = null,
     drainTasks = null,
     assertActive = () => {},
     getSteering = () => [],
@@ -94,6 +93,7 @@ export class CeoWorkspace {
     agentContext = null,
     taskContext = null,
     onPlan = async () => {},
+    onStep = async () => {},
     browserSurface,
     onAgentMessage = async () => {},
     now = () => Date.now(),
@@ -105,7 +105,8 @@ export class CeoWorkspace {
       || !audit
       || !decisions
       || typeof onAgentMessage !== 'function'
-      || typeof onPlan !== 'function') {
+      || typeof onPlan !== 'function'
+      || typeof onStep !== 'function') {
       throw new TypeError('CEO workspace requires identity, grant, gateway, audit, and decisions')
     }
     this.agentId = agentId
@@ -121,6 +122,8 @@ export class CeoWorkspace {
     this.specialistCatalog = new Map(specialistCatalog.map((manifest) => [manifest.agentId, structuredClone(manifest)]))
     this.resolveSpecialist = resolveSpecialist
     this.dispatchTask = dispatchTask
+    this.dispatchPlan = dispatchPlan
+    this.resolveResources = resolveResources
     this.drainTasks = drainTasks
     this.assertActive = assertActive
     this.getSteering = getSteering
@@ -128,6 +131,7 @@ export class CeoWorkspace {
     this.agentContext = agentContext ? structuredClone(agentContext) : null
     this.taskContext = taskContext ? structuredClone(taskContext) : null
     this.onPlan = onPlan
+    this.onStep = onStep
     this.browserSurface = browserSurface
     this.onAgentMessage = onAgentMessage
     this.now = now
@@ -197,7 +201,14 @@ export class CeoWorkspace {
         } : { agentId }
       }),
     }, { captureProposal: true })
-    const plan = validatePlan(proposal.result)
+    // Capture the model's identity mode before normalization assigns legacy
+    // step-N IDs. Only plans that were explicitly fully identified may enter
+    // the dependency/resource scheduler; omission remains the sequential A2A
+    // compatibility path.
+    const proposedTasks = proposal.result?.tasks
+    const explicitGraph = Array.isArray(proposedTasks) && proposedTasks.length > 0
+      && proposedTasks.every(task => isRecord(task) && typeof task.nodeId === 'string' && task.nodeId.length > 0)
+    const plan = validatePlan(proposal.result, this.#availableSpecialists())
     const { assertProposalCurrent } = proposal
     this.assertActive()
     if (plan.tasks.some((task) => !this.#availableSpecialists().includes(task.specialistAgentId))) {
@@ -207,7 +218,7 @@ export class CeoWorkspace {
       && plan.tasks.some((task) => task.specialistAgentId !== requestedSpecialistAgentId)) {
       throw Object.assign(new Error('TARGET_SPECIALIST_MISMATCH'), { code: 'TARGET_SPECIALIST_MISMATCH' })
     }
-    await this.onPlan(structuredClone(plan))
+    await this.onPlan(structuredClone(plan), assertProposalCurrent)
     this.audit.append({
       kind: 'ceo.task.decomposed',
       taskId: envelope.payload.taskId,
@@ -217,20 +228,57 @@ export class CeoWorkspace {
       at: new Date(this.now()).toISOString(),
     })
 
-    const results = []
-    for (const [index, task] of plan.tasks.entries()) {
+    let results = []
+    const resultsByNode = new Map()
+    if (explicitGraph && this.dispatchPlan) {
       assertProposalCurrent()
-      results.push(await this.delegateTask({
+      results = await this.dispatchPlan({
+        taskId: envelope.payload.taskId,
+        tasks: plan.tasks,
+        planHash: sha256({ schema: TASK_PLAN_SCHEMA, tasks: plan.tasks }),
+        revision: 1,
+        assertProposalCurrent,
+        resolveResources: this.resolveResources ?? (async () => null),
+        onStep: this.onStep,
+      })
+    } else for (const [index, task] of plan.tasks.entries()) {
+      assertProposalCurrent()
+      const unmetDependency = task.dependsOn.find((dependency) => {
+        const dependencyResult = resultsByNode.get(dependency)
+        return !dependencyResult || !['completed', 'succeeded'].includes(dependencyResult.status)
+      })
+      if (unmetDependency) {
+        const blocked = {
+          status: 'blocked',
+          reason: 'TASK_DEPENDENCY_NOT_COMPLETED',
+          dependency: unmetDependency,
+          taskId: envelope.payload.taskId,
+          nodeId: task.nodeId,
+          specialistAgentId: task.specialistAgentId,
+        }
+        await this.onStep({ taskId: envelope.payload.taskId, nodeId: task.nodeId, status: 'blocked', reason: unmetDependency })
+        results.push(blocked)
+        resultsByNode.set(task.nodeId, blocked)
+        continue
+      }
+      const result = await this.delegateTask({
         ...task,
         taskId: this.dispatchTask ? envelope.payload.taskId : `${envelope.payload.taskId}:${index + 1}`,
         parentMessageId: envelope.payload.messageId,
         assertProposalCurrent,
-      }))
+      })
+      results.push(result)
+      resultsByNode.set(task.nodeId, result)
     }
 
     if (this.drainTasks) {
       const delivered = await this.drainTasks()
-      for (const result of delivered) if (!results.some(existing => existing.messageId === result.messageId)) results.push(result)
+      for (const result of delivered) {
+        // Peer jobs may inherit the root/node provenance for signed evidence.
+        // They remain evidence for RJ synthesis, but only the canonical CEO
+        // assignment is allowed to drive this plan step's durable state.
+        if (!results.some(existing => existing.messageId === result.messageId)) results.push(result)
+      }
     }
 
     const synthesis = validateSynthesis(await this.#route(
@@ -255,7 +303,19 @@ export class CeoWorkspace {
     })
 
     const decision = synthesis.decision
-      ? await this.requestAction({ ...synthesis.decision, taskId: envelope.payload.taskId })
+      ? await this.requestAction({
+        capability: synthesis.decision.capability,
+        resource: synthesis.decision.resource,
+        operation: synthesis.decision.operation,
+        actionDiff: synthesis.decision.actionDiff,
+        rationale: synthesis.decision.rationale,
+        title: synthesis.decision.title,
+        detail: synthesis.decision.detail,
+        taskId: envelope.payload.taskId,
+        // The synthesis model cannot select a plan node. CEO synthesis is a
+        // root-task decision unless a future trusted node owner invokes it.
+        nodeId: null,
+      })
       : null
     return {
       status: 'completed',
@@ -272,6 +332,10 @@ export class CeoWorkspace {
     objective,
     acceptanceCriteria,
     request = null,
+    nodeId = null,
+    dependsOn = [],
+    requirements = undefined,
+    resources = undefined,
     taskId,
     parentMessageId = null,
     assertProposalCurrent = () => {},
@@ -281,8 +345,45 @@ export class CeoWorkspace {
     if (this.dispatchTask) {
       await this.onCheckpoint({ stage: 'delegating', agentId: specialistAgentId, summary: objective })
       assertProposalCurrent()
-      const result = await this.dispatchTask({ specialistAgentId, objective, acceptanceCriteria, request, taskId, parentMessageId, assertProposalCurrent })
-      if (result.reason?.startsWith('AGENT_LOOP_') || result.reason === 'TASK_PLAN_STALE') throw Object.assign(new Error(result.reason), { code: result.reason })
+      let assignmentMessageId = null
+      let canonicalAssignmentId = null
+      let result
+      try {
+        result = await this.dispatchTask({ specialistAgentId, objective, acceptanceCriteria, request, nodeId, dependsOn, requirements, resources, taskId, parentMessageId, assertProposalCurrent,
+          onAssignment: async ({ assignmentMessageId: messageId, canonicalAssignmentId: canonicalId }) => {
+            assignmentMessageId = messageId ?? null
+            canonicalAssignmentId = canonicalId ?? assignmentMessageId
+            await this.onStep({ taskId, nodeId, status: 'running', messageId: assignmentMessageId })
+            assertProposalCurrent()
+          } })
+      } catch (failure) {
+        // A signed handoff was admitted before the dispatcher can reject or
+        // lose a later boundary. Never leave its canonical node running.
+        if (assignmentMessageId !== null) {
+          const reason = failure?.code ?? 'SPECIALIST_DISPATCH_FAILED'
+          const unknown = ['MODEL_CALL_OUTCOME_UNKNOWN', 'TEAM_WAIT_TIMEOUT_OUTCOME_UNKNOWN', 'TEAM_INTERRUPTION_DURABILITY_FAILED'].includes(reason)
+          await this.onStep({ taskId, nodeId, status: unknown ? 'unknown' : 'failed', messageId: canonicalAssignmentId ?? assignmentMessageId, resultId: null, reason })
+        }
+        throw failure
+      }
+      const propagateFailure = result.reason?.startsWith('AGENT_LOOP_') || result.reason === 'TASK_PLAN_STALE'
+      await this.onStep({
+        taskId,
+        nodeId,
+        status: result.status === 'completed' || result.status === 'succeeded' ? 'completed'
+          : result.status === 'unknown'
+            || result.reason === 'TEAM_WAIT_TIMEOUT_OUTCOME_UNKNOWN'
+            || result.reason === 'TEAM_INTERRUPTION_DURABILITY_FAILED'
+            || result.reason === 'MODEL_CALL_OUTCOME_UNKNOWN'
+            || result.durability === 'unknown'
+            || typeof result.durabilityReason === 'string' ? 'unknown'
+            : result.status === 'blocked' ? 'blocked' : 'failed',
+        messageId: result.assignmentMessageId ?? result.messageId ?? null,
+        // The handoff is an assignment identity, never a signed result.
+        resultId: result.resultId ?? null,
+        reason: result.reason ?? null,
+      })
+      if (propagateFailure) throw Object.assign(new Error(result.reason), { code: result.reason })
       if (result.attribution) await this.onCheckpoint({ stage: 'specialist-completed', agentId: specialistAgentId,
         summary: result.summary, effectOutcome: result.status, result: result.result })
       return result
@@ -310,6 +411,7 @@ export class CeoWorkspace {
       messageId: `handoff-${crypto.randomUUID()}`,
       type: 'task_handoff',
       taskId,
+      nodeId,
       parentMessageId,
       ...window,
       request,
@@ -323,10 +425,24 @@ export class CeoWorkspace {
       operation: 'send',
       messageId: envelope.payload.messageId,
       messageHash: sha256(envelope),
+      taskId,
+      nodeId,
       ...window,
     }, this.identity)
     const messageDecision = this.gateway.submit({ grant: this.grant, action: messageAction })
     if (messageDecision.status !== 'allowed') {
+      // The model never owns this gateway decision. The canonical node was
+      // admitted to the durable plan, so a direct denial must still leave an
+      // explicit terminal step rather than a queued row that synthesis can
+      // accidentally treat as unattempted work.
+      await this.onStep({
+        taskId,
+        nodeId,
+        status: 'blocked',
+        messageId: null,
+        resultId: null,
+        reason: messageDecision.reason ?? 'MESSAGE_GATEWAY_DENIED',
+      })
       return {
         status: 'rejected',
         reason: messageDecision.reason ?? 'MESSAGE_GATEWAY_DENIED',
@@ -334,7 +450,14 @@ export class CeoWorkspace {
         messageDecision,
       }
     }
-    this.audit.append({
+    // The assignment is now signed and durably accepted by the gateway. Link
+    // that exact handoff before invoking the specialist; it is not a result
+    // identifier and must never be substituted for one.
+    await this.onStep({ taskId, nodeId, status: 'running', messageId: envelope.payload.messageId })
+    let stepTerminalRecorded = false
+    try {
+      assertProposalCurrent()
+      this.audit.append({
       kind: 'agent.message.sent',
       messageId: envelope.payload.messageId,
       taskId,
@@ -344,8 +467,8 @@ export class CeoWorkspace {
       grantId: this.grant.payload.grantId,
       gatewayActionId: messageDecision.actionId,
       at: new Date(this.now()).toISOString(),
-    })
-    await this.onAgentMessage({
+      })
+      await this.onAgentMessage({
       messageId: envelope.payload.messageId,
       taskId,
       senderAgentId: this.agentId,
@@ -360,17 +483,22 @@ export class CeoWorkspace {
         grantId: this.grant.payload.grantId,
         gatewayActionId: messageDecision.actionId,
       },
-    })
-    assertProposalCurrent()
-    const handled = await specialist.handle({
+      })
+      assertProposalCurrent()
+      const handled = await specialist.handle({
       envelope,
       senderGrant: this.grant,
       sender: { agentId: this.agentId, publicIdentity: this.signingProvider.publicIdentity() },
-    })
-    this.assertActive()
-    if (handled.status !== 'completed') return handled
+      })
+      this.assertActive()
+      if (handled.status !== 'completed') {
+        const unknown = handled.status === 'unknown' || ['MODEL_CALL_OUTCOME_UNKNOWN', 'TEAM_INTERRUPTION_DURABILITY_FAILED'].includes(handled.reason)
+        await this.onStep({ taskId, nodeId, status: unknown ? 'unknown' : 'failed', messageId: envelope.payload.messageId, resultId: null, reason: handled.reason ?? 'SPECIALIST_HANDOFF_FAILED' })
+        stepTerminalRecorded = true
+        return handled
+      }
 
-    const resultVerification = verifyAgentMessage({
+      const resultVerification = verifyAgentMessage({
       envelope: handled.envelope,
       senderGrant: specialist.grant,
       recipientGrant: this.grant,
@@ -380,10 +508,21 @@ export class CeoWorkspace {
       },
       humanKeys: this.humanKeys,
       now: this.now,
-    })
-    this.#recordReceived(handled.envelope, resultVerification)
-    if (resultVerification.status !== 'accepted') return resultVerification
-    await this.onAgentMessage({
+      })
+      this.#recordReceived(handled.envelope, resultVerification)
+      if (resultVerification.status !== 'accepted') {
+        await this.onStep({ taskId, nodeId, status: 'unknown', messageId: envelope.payload.messageId, resultId: null, reason: resultVerification.reason ?? 'SPECIALIST_RESULT_UNVERIFIED' })
+        stepTerminalRecorded = true
+        return resultVerification
+      }
+      if ((resultVerification.nodeId ?? null) !== (nodeId ?? null)
+      || resultVerification.taskId !== taskId
+      || handled.envelope.payload.parentMessageId !== envelope.payload.messageId) {
+        await this.onStep({ taskId, nodeId, status: 'unknown', messageId: envelope.payload.messageId, resultId: null, reason: 'SPECIALIST_RESULT_ASSIGNMENT_MISMATCH' })
+        stepTerminalRecorded = true
+        return { status: 'rejected', reason: 'SPECIALIST_RESULT_ASSIGNMENT_MISMATCH', taskId, nodeId }
+      }
+      await this.onAgentMessage({
       messageId: handled.envelope.payload.messageId,
       parentMessageId: handled.envelope.payload.parentMessageId,
       taskId,
@@ -398,10 +537,19 @@ export class CeoWorkspace {
         signerAgentId: specialistAgentId,
         grantId: specialist.grant.payload.grantId,
       },
-    })
-    await this.onCheckpoint({ stage: 'specialist-completed', agentId: specialistAgentId, summary: handled.envelope.payload.content.summary, effectOutcome: handled.envelope.payload.content.status,
-      result: handled.envelope.payload.content.result })
-    return {
+      })
+      await this.onCheckpoint({ stage: 'specialist-completed', agentId: specialistAgentId, summary: handled.envelope.payload.content.summary, effectOutcome: handled.envelope.payload.content.status,
+        result: handled.envelope.payload.content.result })
+      await this.onStep({
+      taskId,
+      nodeId,
+      status: handled.envelope.payload.content.status === 'succeeded' || handled.envelope.payload.content.status === 'completed' ? 'completed' : 'failed',
+      messageId: envelope.payload.messageId,
+      resultId: handled.envelope.payload.messageId,
+        reason: handled.envelope.payload.content.status === 'failed' ? handled.envelope.payload.content.summary : null,
+      })
+      stepTerminalRecorded = true
+      return {
       status: handled.envelope.payload.content.status,
       specialistAgentId,
       taskId,
@@ -409,10 +557,20 @@ export class CeoWorkspace {
       summary: handled.envelope.payload.content.summary,
       actionDecision: structuredClone(handled.actionDecision),
       attribution: resultVerification.attribution,
+      nodeId,
+      assignmentMessageId: envelope.payload.messageId,
+      messageId: handled.envelope.payload.messageId,
+      resultId: handled.envelope.payload.messageId,
+      }
+    } catch (failure) {
+      const reason = failure?.code ?? 'SPECIALIST_EXECUTION_FAILED'
+      const unknown = ['MODEL_CALL_OUTCOME_UNKNOWN', 'TEAM_WAIT_TIMEOUT_OUTCOME_UNKNOWN', 'TEAM_INTERRUPTION_DURABILITY_FAILED'].includes(reason)
+      if (!stepTerminalRecorded) await this.onStep({ taskId, nodeId, status: unknown ? 'unknown' : 'failed', messageId: envelope.payload.messageId, resultId: null, reason })
+      throw failure
     }
   }
 
-  async requestAction({ capability, resource, operation, actionDiff, rationale, taskId, title, detail }) {
+  async requestAction({ capability, resource, operation, actionDiff, rationale, taskId = null, nodeId = null, title, detail }) {
     this.assertActive()
     const steering = JSON.stringify(this.getSteering())
     const window = containedWindow([this.grant], this.now())
@@ -424,6 +582,7 @@ export class CeoWorkspace {
       operation,
       actionDiff: structuredClone(actionDiff),
       taskId,
+      nodeId,
       ...window,
     }, this.identity)
     const policyDecision = evaluatePolicy(this.gateway.policy, action.payload)
@@ -435,6 +594,8 @@ export class CeoWorkspace {
         actionDiff: structuredClone(action.payload.actionDiff),
         resource: action.payload.resource,
         expiresAt: action.payload.expiresAt,
+        taskId,
+        nodeId,
         agent: {
           agentId: this.agentId,
           grantId: this.grant.payload.grantId,
@@ -457,10 +618,15 @@ export class CeoWorkspace {
     return result
   }
 
-  async browserCommand(command) {
+  async browserCommand(command, { taskId = null, nodeId = null } = {}) {
     this.assertActive()
     if (!this.browserSurface?.agentCommand) return { status: 'denied', reason: 'BROWSER_SURFACE_UNAVAILABLE' }
-    return this.browserSurface.agentCommand(command, { grant: this.grant })
+    // Browser actions issued by the CEO are bound to the trusted root task;
+    // model-proposed command fields never choose task or node identity.
+    return this.browserSurface.agentCommand(command, {
+      grant: this.grant,
+      scope: { taskId, nodeId },
+    })
   }
 
   #availableSpecialists() {
