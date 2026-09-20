@@ -47,7 +47,8 @@ test('the operating canvas keeps task planning visible and accepts work from one
 })
 
 test('the Queue navigation view is history, not a second inbox', () => {
-  assert.match(appSource, /function QueueView\(\{ state, onConnectCodex, refresh, notify, roomAddress, setRoomAddress \}\)/)
+  assert.match(appSource, /function QueueView\(\{ state, onConnectCodex, refresh, notify, onNavigate, onOutcomeAction, roomAddress, setRoomAddress \}\)/)
+  assert.match(appSource, /<TaskWorkspace[\s\S]*onOutcomeAction=\{onOutcomeAction\}/)
   assert.match(appSource, /eyebrow="RJ's queue"/)
   assert.match(appSource, /title="What are we working on\?"/)
   assert.match(appSource, /message box below/)
@@ -76,6 +77,7 @@ test('the Agents view reports model-provider and GitHub connection state with ho
   assert.match(appSource, /\/api\/agents\/import/)
   assert.match(appSource, /\/api\/agents\/main\/import/)
   assert.match(appSource, /Import RJ continuity/)
+  assert.match(appSource, /candidate\.dependencyStatus/)
   assert.match(appSource, /\/api\/agents\/workers\/\$\{action\}/)
   assert.match(appSource, /\/api\/agents\/remove/)
   assert.match(appSource, /Connect GitHub/)
@@ -100,6 +102,13 @@ test('the Agents view reports model-provider and GitHub connection state with ho
   assert.match(appSource, /\/api\/models\/check/)
   assert.match(styles, /\.model-catalog/)
   assert.match(styles, /\.agent-import-panel/)
+})
+
+test('catalog-only conversation models select without claiming access verification', () => {
+  assert.match(appSource, /onClick=\{\(\) => run\(model, onModelSelect\)\}/)
+  assert.match(appSource, /ready \? 'Use model' : 'Select model'/)
+  assert.match(appSource, /Catalog only · not verified/)
+  assert.doesNotMatch(appSource, /ready \? 'Use model' : 'Check & use'/)
 })
 
 test('imported specialists do not offer Start unless an RJ task owns them', () => {

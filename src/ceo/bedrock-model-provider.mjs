@@ -144,6 +144,7 @@ export function createBedrockModelRouter({
     providerId: 'aws-bedrock',
     model: modelId,
     protocol: 'bedrock-converse',
+    execution: 'inference-only',
     region,
   })
   return validateModelRouter(Object.freeze({

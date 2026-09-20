@@ -122,6 +122,25 @@ They must not contain credentials or unredacted sensitive values. Production
 still needs durable gateway pending-state recovery, model-result encryption and
 redaction rules, an append-enforcing audit store, and immutable anchors.
 
+## Conversation modes and task routing
+
+The shared Conversation surface keeps the destination explicit. **Ask agent**
+is an inference-only request to the selected agent and does not grant tools,
+create a task, or prove task execution. **Start work** creates a durable task;
+**Continue task** creates a new explicit continuation linked to a terminal task;
+and task guidance addresses the selected task at its next safe boundary. Each
+mode owns its task/agent draft, destination revision, request identity, and
+receipt lookup state, so changing rooms does not silently retarget or resend a
+draft.
+
+Task routing is structured and task-bound. Auto, Preferred, and Pinned remain
+distinct policies: Preferred may fall back before dispatch, while Pinned fails
+closed when its exact route is unavailable. Requirements, model preferences,
+access ceilings, and task leases are checked by the runtime before dispatch;
+model output, imported persona files, and agent messages remain data rather
+than authority. A lost post-dispatch outcome stays unknown until inspected and
+is never retried automatically.
+
 ## Activity projection
 
 `createActivityProjection()` returns `chimera.activity-projection.v1`:

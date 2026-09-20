@@ -47,6 +47,17 @@ function boundedString(value, maximum = 2048) {
   return typeof value === 'string' && value.length > 0 && value.length <= maximum
 }
 
+function trustedScope(scope) {
+  if (scope === undefined || scope === null) return { taskId: null, nodeId: null }
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) throw new TypeError('BROWSER_SCOPE_INVALID')
+  const taskId = scope.taskId ?? null
+  const nodeId = scope.nodeId ?? null
+  if ((taskId !== null && !boundedString(taskId, 256))
+    || (nodeId !== null && !boundedString(nodeId, 128))
+    || (nodeId !== null && taskId === null)) throw new TypeError('BROWSER_SCOPE_INVALID')
+  return { taskId, nodeId }
+}
+
 function sameAction(payload, expected) {
   return payload?.agentId === expected.actorId
     && payload?.sessionId === expected.sessionId
@@ -54,6 +65,8 @@ function sameAction(payload, expected) {
     && payload?.resource === expected.resource
     && payload?.operation === expected.operation
     && payload?.commandHash === expected.commandHash
+    && (payload?.taskId ?? null) === expected.taskId
+    && (payload?.nodeId ?? null) === expected.nodeId
 }
 
 function sameHumanAction(payload, expected) {
@@ -156,9 +169,13 @@ export class OpenBotBrowserComputerAdapter {
     return pending ? structuredClone(pending) : null
   }
 
-  async agentCommand(input, { grant = this.grant, action } = {}) {
+  async agentCommand(input, { grant = this.grant, action, scope } = {}) {
     const prepared = this.#prepareCommand(input, 'agent')
     if (prepared.status === 'denied') return prepared
+    let trusted
+    try { trusted = trustedScope(scope) } catch (error) {
+      return this.#recordBrowserAction(undefined, input.command, 'agent', this.agentId, prepared.resource, 'denied', error.code)
+    }
 
     const envelope = action ?? signAction({
       actionId: `browser-${crypto.randomUUID()}`,
@@ -168,6 +185,8 @@ export class OpenBotBrowserComputerAdapter {
       resource: prepared.resource,
       operation: prepared.operation,
       commandHash: sha256(input),
+      ...(trusted.taskId ? { taskId: trusted.taskId } : {}),
+      ...(trusted.nodeId ? { nodeId: trusted.nodeId } : {}),
       ...isoWindow(this.now()),
     }, this.agentIdentity)
 
@@ -178,6 +197,8 @@ export class OpenBotBrowserComputerAdapter {
       resource: prepared.resource,
       operation: prepared.operation,
       commandHash: sha256(input),
+      taskId: trusted.taskId,
+      nodeId: trusted.nodeId,
     }
     if (!sameAction(envelope?.payload, expected)) {
       return this.#recordBrowserAction(envelope?.payload?.actionId, input.command, 'agent', this.agentId, prepared.resource, 'denied', 'ACTION_COMMAND_MISMATCH')
@@ -190,6 +211,7 @@ export class OpenBotBrowserComputerAdapter {
         command: structuredClone(input),
         controlVersion: this.#controlVersion,
         resource: prepared.resource,
+        scope: trusted,
       })
       this.#recordBrowserAction(decision.actionId, input.command, 'agent', this.agentId, prepared.resource, 'pending', decision.reason)
       return decision

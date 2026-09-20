@@ -45,7 +45,7 @@ test('Projects shows attributed reports and continues only the selected task wit
       if (path === '/api/conversations/messages') {
         if (rejectHistory) { rejectHistory = false; return route.fulfill({ status: 503, json: { error: 'REPORT_HISTORY_UNAVAILABLE' } }) }
         if (url.searchParams.get('before') === 'history-page-2') return route.fulfill({ json: { messages: [message('oldest', 'task-new', 'Earliest attributable observation.')], nextCursor: null } })
-        return route.fulfill({ json: { messages: [message('older', 'task-new', '<script>window.reportInjected=true</script> Earlier source evidence.'), message('wrong-room', 'task-old', 'Unrelated task report must not appear.')], nextCursor: 'history-page-2' } })
+        return route.fulfill({ json: { messages: [message('older', 'task-new', '<script>window.reportInjected=true</script> Earlier source evidence.'), { ...message('wrong-room', 'task-old', 'Unrelated task report must not appear.'), conversationId: 'task:task-new' }], nextCursor: 'history-page-2' } })
       }
       return route.fulfill({ json: {} })
     })

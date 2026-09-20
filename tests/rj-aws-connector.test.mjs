@@ -79,9 +79,40 @@ function connectorFixture(overrides = {}) {
       audit: { append: fact => audit.push(structuredClone(fact)) },
       now: () => now,
       transport,
+      ...(overrides.assertConnected ? { assertConnected: overrides.assertConnected } : {}),
     }),
   }))
 }
+
+test('queued RJ AWS work rechecks the durable connection before its actual execution', async t => {
+  let enteredResolve, releaseResolve
+  const entered = new Promise(resolve => { enteredResolve = resolve })
+  const released = new Promise(resolve => { releaseResolve = resolve })
+  let connected = true
+  let transports = 0
+  const { connector } = await connectorFixture({
+    assertConnected: () => {
+      if (!connected) throw Object.assign(new Error('CONNECTION_DISABLED'), { code: 'CONNECTION_DISABLED' })
+    },
+    transport: async request => {
+      transports += 1
+      if (transports === 1) {
+        enteredResolve()
+        await released
+      }
+      return JSON.stringify(receiptFor(request))
+    },
+  })
+  const context = { agentId: 'ace', taskId: 'task-1', assertActive: async () => authority() }
+  const first = connector.execute('rj.aws.identity', context)
+  await entered
+  const second = connector.execute('rj.aws.instance_status', context)
+  connected = false
+  releaseResolve()
+  await first
+  await assert.rejects(() => second, { code: 'CONNECTION_DISABLED' })
+  assert.equal(transports, 1)
+})
 
 test('unconfigured RJ AWS connector registers no tools or transport work', async () => {
   const module = await import('../src/rj-aws/connector.mjs').catch(() => ({}))

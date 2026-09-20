@@ -32,6 +32,12 @@ function coded(code) {
   return Object.assign(new Error(code), { code })
 }
 
+function assertConnectionNow(assertConnected) {
+  if (!assertConnected) return
+  const result = assertConnected()
+  if (result && typeof result.then === 'function') throw coded('RJ_CONNECTION_GUARD_INVALID')
+}
+
 function record(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
@@ -306,6 +312,7 @@ export function createRjAwsConnector({
   evidence,
   now = () => Date.now(),
   transport,
+  assertConnected,
 } = {}) {
   const configured = config !== null && config !== undefined
   if (!configured) {
@@ -330,7 +337,8 @@ export function createRjAwsConnector({
     sshTarget: resolvedConfig.sshTarget,
     workerEntrypoint: resolvedConfig.workerEntrypoint,
   })
-  if (typeof identityFor !== 'function' || !humanIdentity?.privateKey || !audit?.append || typeof now !== 'function' || typeof resolvedTransport !== 'function') {
+  if (typeof identityFor !== 'function' || !humanIdentity?.privateKey || !audit?.append || typeof now !== 'function' || typeof resolvedTransport !== 'function'
+    || (assertConnected !== undefined && typeof assertConnected !== 'function')) {
     throw coded('RJ_AWS_CONFIG_INVALID')
   }
   const pinnedWorkerKey = validatePinnedKey(resolvedConfig)
@@ -386,6 +394,10 @@ export function createRjAwsConnector({
       const auditedAuthority = await activeAuthority(context, now())
       if (canonicalJson(auditedAuthority) !== canonicalJson(authority)) throw coded('RJ_TASK_AUTHORITY_INACTIVE')
     }
+    // This is the final runtime-owned connection fence before the physical
+    // transport call. It intentionally sits outside the transport catch so a
+    // durable disconnect remains CONNECTION_DISABLED, not a worker outage.
+    assertConnectionNow(assertConnected)
     let raw
     try {
       raw = await resolvedTransport(structuredClone(wireRequest), {
@@ -500,7 +512,10 @@ export function createRjAwsConnector({
   // A queued call resolves fresh authority when it starts; this never retries it.
   let settlement = Promise.resolve()
   const serial = operation => {
-    const pending = settlement.then(operation)
+    const pending = settlement.then(async () => {
+      assertConnectionNow(assertConnected)
+      return operation()
+    })
     settlement = pending.catch(() => {})
     return pending
   }

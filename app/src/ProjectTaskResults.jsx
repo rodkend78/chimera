@@ -13,7 +13,7 @@ export function ProjectTaskResults({ task, session, messages = [], agents = [] }
   const conversationId = `task:${task.taskId}`
   const hasRjSummary = task.status === 'completed' && typeof task.summary === 'string'
   const reports = [...new Map([...history, ...messages]
-    .filter(message => message.conversationId === conversationId && message.kind === 'structured_result')
+    .filter(message => message.taskId === task.taskId && message.conversationId === conversationId && message.kind === 'structured_result')
     .map(message => [message.messageId, message])).values()]
     .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
   const displayName = id => ['ceo', 'rj'].includes(id) ? 'RJ' : agents.find(agent => agent.agentId === id)?.displayName ?? id
@@ -29,7 +29,8 @@ export function ProjectTaskResults({ task, session, messages = [], agents = [] }
       const result = await api(`/api/conversations/messages?${query}`, { signal: controller.signal })
       if (!Array.isArray(result.messages)) throw new Error('REPORT_HISTORY_INVALID')
       if (!controller.signal.aborted) {
-        setHistory(previous => [...result.messages, ...previous])
+        const selected = result.messages.filter(message => message.taskId === task.taskId && message.conversationId === conversationId)
+        setHistory(previous => [...selected, ...previous])
         setCursor(result.nextCursor ?? null)
       }
     } catch (failure) {

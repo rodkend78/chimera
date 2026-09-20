@@ -21,7 +21,7 @@ async function fixture(t, codex) {
   const directory = await mkdtemp(join(tmpdir(), 'chimera-model-controls-'))
   const audit = new MemoryAuditLog()
   const provider = createCodexSubscriptionModelRouter({ codex })
-  const fabric = createTaskAwareModelRouter({ audit, routes: [{ id: 'codex', router: provider, capabilities: ['orchestration', 'reasoning'], costClass: 'subscription' }] })
+  const fabric = createTaskAwareModelRouter({ audit, eligibility: () => ({ connectionEnabled: true, agentAllowed: true, executorAllowed: true, requirementsSatisfied: true, pinSatisfied: true, reasons: [] }), routes: [{ id: 'codex', router: provider, capabilities: ['orchestration', 'reasoning'], costClass: 'subscription' }] })
   const runtime = new ChimeraBrowserRuntime({
     profileDir: join(directory, 'profiles/ceo'), audit,
     agentReferenceProvider: { materialize: async () => [{ path: 'MEMORY.md', content: 'Fixture agent continuity.' }] },

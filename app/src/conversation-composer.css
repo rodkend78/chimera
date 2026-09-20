@@ -1,0 +1,68 @@
+.conversation-composer { grid-area: status; min-width: 0; min-height: 0; overflow: auto; display: grid; align-content: start; gap: 8px; padding: 11px 24px 13px; border-top: 1px solid #d6e1e8; background: #fff; scrollbar-gutter: stable; }
+.conversation-composer-header, .conversation-composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.conversation-composer-header h2 { margin: 0; font-size: 17px; }
+.conversation-composer-header p { display: none; }
+.conversation-composer-header-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.conversation-composer-header-actions button, .conversation-receipt-lookup, .conversation-destination-review button, .conversation-unavailable-card button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 34px; padding: 6px 10px; border: 1px solid #c7d6e2; border-radius: 9px; background: #f5f8fc; color: #233d58; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.conversation-composer-header-actions button:hover:not(:disabled), .conversation-receipt-lookup:hover:not(:disabled) { border-color: #67bfc7; background: #edfafa; }
+.conversation-composer button:disabled { cursor: default; opacity: .65; }
+.conversation-composer :is(button, input, textarea, select, summary):focus-visible, .conversation-unavailable button:focus-visible { outline: 2px solid #008ca3; outline-offset: 2px; }
+.conversation-composer-controls { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; min-width: 0; }
+.conversation-composer[data-mode="ask"] .conversation-composer-controls, .conversation-composer[data-mode="guidance"] .conversation-composer-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.conversation-composer label, .conversation-recipient-area { display: grid; gap: 4px; min-width: 0; color: #344054; font-size: 12px; }
+.conversation-composer select, .conversation-composer input, .conversation-composer textarea { width: 100%; min-width: 0; border: 1px solid #c9d6df; border-radius: 8px; padding: 7px 9px; background: #fff; color: #233d58; }
+.conversation-composer textarea { display: block; min-height: 62px; max-height: 88px; resize: vertical; }
+.conversation-composer form { display: grid; gap: 6px; min-width: 0; }
+.conversation-composer-footer span { min-width: 0; color: #667085; font-size: 12px; overflow-wrap: anywhere; }
+.conversation-composer-footer button { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; }
+.conversation-queue-choice { grid-column: 1 / -1; }
+.conversation-queue-choice span:last-child { display: inline-flex; align-items: center; gap: 6px; }
+.conversation-queue-choice input[type="checkbox"] { width: auto; }
+.conversation-destination-review { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px; border-radius: 8px; color: #7a4a00; background: #fff6df; font-size: 12px; }
+.conversation-recipient-area { max-height: 74px; overflow: auto; }
+.conversation-recipient-area:has(.conversation-mention-suggestions) { position: relative; z-index: 2; max-height: 124px; overflow: visible; }
+.conversation-recipient-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.conversation-recipient-chips button, .conversation-mention-suggestions button { border: 1px solid #b9dce0; border-radius: 999px; padding: 5px 8px; background: #effbfc; color: #075e69; }
+.conversation-mention-suggestions { display: grid; gap: 4px; max-height: 140px; overflow: auto; }
+.conversation-mention-suggestions button { border-radius: 7px; text-align: left; }
+.conversation-feedback { display: grid; gap: 6px; min-width: 0; }
+.conversation-notice { margin: 0; padding: 8px 10px; border-radius: 8px; font-size: 12px; overflow-wrap: anywhere; }
+.conversation-notice.warning { color: #7a4a00; background: #fff6df; }
+.conversation-notice.error { color: #8d1d2c; background: #fff0f1; }
+.conversation-notice.success { color: #11613b; background: #ebfaf1; }
+.conversation-recovery-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 12px; min-width: 0; }
+.conversation-receipt-lookup { border-color: #74c1cb; background: #eaf9fa; color: #075e69; }
+.conversation-recovery-details { min-width: 0; max-width: 100%; color: #526779; font-size: 12px; }
+.conversation-recovery-details summary { cursor: pointer; padding: 8px 2px; }
+.conversation-recovery-details code { display: block; padding: 6px; border-radius: 6px; background: #f0f4f8; overflow-wrap: anywhere; }
+.conversation-unavailable { grid-area: status; min-width: 0; min-height: 0; display: grid; place-items: center; padding: 18px 24px; border-top: 1px solid #d6e1e8; background: #fff; }
+.conversation-unavailable-card { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; max-width: 1100px; width: 100%; color: #344054; }
+.conversation-unavailable-card span { flex: 1 1 360px; color: #667085; font-size: 13px; }
+
+/* Keep everyday Ask compact. Extra task/recovery controls remain keyboard
+   reachable in the local scroll region without taking over the work canvas. */
+.app-shell.app-shell:has(.conversation-composer) { --statusbar: min(310px, 40dvh); }
+.app-shell.app-shell:has(.conversation-composer[data-mode="ask"]) { --statusbar: min(260px, 40dvh); }
+.app-shell.app-shell:has(.conversation-composer[data-mode="guidance"]), .app-shell.app-shell:has(.conversation-composer[data-recovery="true"]) { --statusbar: min(350px, 46dvh); }
+.app-shell.app-shell:has(.conversation-unavailable) { --statusbar: 112px; }
+@media (max-width: 1080px) {
+  .conversation-composer { padding-inline: 18px; }
+}
+@media (max-width: 760px) {
+  .app-shell.app-shell:has(.conversation-composer) { --statusbar: min(290px, 40dvh); }
+  .app-shell.app-shell:has(.conversation-composer[data-mode="ask"]) { --statusbar: min(260px, 40dvh); }
+  .app-shell.app-shell:has(.conversation-composer[data-recovery="true"]) { --statusbar: min(320px, 44dvh); }
+  .app-shell.app-shell:has(.conversation-unavailable) { --statusbar: min(150px, 30dvh); }
+  .conversation-composer { gap: 6px; padding: 9px 12px 10px; }
+  .conversation-composer-header { align-items: stretch; flex-direction: column; gap: 5px; }
+  .conversation-composer-header .card-kicker { display: none; }
+  .conversation-composer-header-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .conversation-composer-header-actions button { min-height: 32px; padding: 4px 5px; font-size: 11px; }
+  .conversation-composer-header-actions button svg { width: 13px; height: 13px; flex-shrink: 0; }
+  .conversation-composer-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .conversation-composer label, .conversation-recipient-area { gap: 3px; font-size: 11px; }
+  .conversation-composer select, .conversation-composer input, .conversation-composer textarea { padding: 6px; }
+  .conversation-composer textarea { min-height: 58px; max-height: 76px; line-height: 1.25; }
+  .conversation-composer-footer { gap: 6px; }
+  .conversation-composer-footer button { min-height: 32px; padding: 5px 9px; }
+}

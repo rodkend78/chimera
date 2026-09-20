@@ -9,6 +9,7 @@ import { agentMessageKeyFingerprint, verifyAgentMessage } from '../agent-message
 const SCHEMA = 'chimera.agent-worker-state.v1'
 const STATES = new Set(['registered', 'starting', 'running', 'stopped', 'interrupted', 'crashed'])
 const AGENT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
+const TRUSTED_PRE_ENTRY_LEASE_DENIALS = new WeakSet()
 
 function bounded(value, maximum = 256) {
   return typeof value === 'string' && value.length > 0 && value.length <= maximum
@@ -238,6 +239,38 @@ export class AgentHarnessWorker {
 
   async executeTool({ name, arguments: args = {}, callId = crypto.randomUUID(), rootCallId = callId }, execution = {}) {
     if (this.#state.state !== 'running') return { status: 'denied', reason: 'WORKER_NOT_RUNNING' }
+    const grantTaskId = bounded(this.grant.payload?.taskId, 256) ? this.grant.payload.taskId : null
+    const taskId = execution.taskId ?? grantTaskId
+    const nodeId = execution.nodeId ?? null
+    const assignmentId = execution.assignmentId ?? null
+    const canonicalAssignmentId = execution.canonicalAssignmentId ?? null
+    if ((taskId !== null && !bounded(taskId, 256))
+      || (nodeId !== null && !bounded(nodeId, 128))
+      || (assignmentId !== null && !bounded(assignmentId, 256))
+      || (canonicalAssignmentId !== null && !bounded(canonicalAssignmentId, 256))
+      || (nodeId !== null && taskId === null)
+      || (assignmentId !== null && taskId === null)
+      || (canonicalAssignmentId !== null && taskId === null)
+      || (grantTaskId !== null && taskId !== grantTaskId)) {
+      return { status: 'denied', reason: 'WORKER_EXECUTION_SCOPE_INVALID' }
+    }
+    let executorEntered = false
+    const assertAccessActive = typeof execution.assertActive === 'function'
+      ? async () => {
+        try {
+          const active = await execution.assertActive()
+          if (active === false) {
+            const error = Object.assign(new Error('PROJECT_ACCESS_LEASE_INACTIVE'), { code: 'PROJECT_ACCESS_LEASE_INACTIVE' })
+            if (!executorEntered) TRUSTED_PRE_ENTRY_LEASE_DENIALS.add(error)
+            throw error
+          }
+          return active
+        } catch (error) {
+          if (!executorEntered && error?.code === 'PROJECT_ACCESS_LEASE_INACTIVE') TRUSTED_PRE_ENTRY_LEASE_DENIALS.add(error)
+          throw error
+        }
+      }
+      : null
     const exec = {
       agent: { id: this.manifest.agentId, session: { id: this.sessionId } },
       callId,
@@ -245,17 +278,17 @@ export class AgentHarnessWorker {
       name,
       arguments: structuredClone(args),
       token: Symbol(callId),
-      assertActive: execution.assertActive,
+      assertActive: assertAccessActive,
+      executionScope: { taskId, nodeId, assignmentId, canonicalAssignmentId },
     }
     const decision = await this.dsh.preExecute(exec)
     if (decision.kind !== 'allow') return { status: 'denied', reason: decision.reason }
     // A confirm-tier approval can wait for several minutes. Revalidate the
     // task lease after DSH approval and immediately before entering the tool
     // body so an approval cannot outlive the authority that requested it.
-    if (typeof execution.assertActive === 'function') {
+    if (assertAccessActive) {
       try {
-        const active = await execution.assertActive()
-        if (active === false) throw Object.assign(new Error('PROJECT_ACCESS_LEASE_INACTIVE'), { code: 'PROJECT_ACCESS_LEASE_INACTIVE' })
+        await assertAccessActive()
       } catch (error) {
         this.dsh.observeResult(exec, { isError: true })
         return { status: 'denied', reason: error?.code === 'PROJECT_ACCESS_LEASE_INACTIVE' ? error.code : 'PROJECT_ACCESS_LEASE_INACTIVE' }
@@ -267,16 +300,20 @@ export class AgentHarnessWorker {
       return { status: 'denied', reason: 'WORKER_TOOL_EXECUTOR_UNAVAILABLE' }
     }
     try {
+      executorEntered = true
       const workspace = execution.workspace?.state && bounded(execution.workspace.path, 4096)
         ? execution.workspace
         : this.workspace
       const result = await executor(structuredClone(exec.arguments), {
         workspace,
         agentId: this.manifest.agentId,
-        taskId: this.grant.payload.taskId,
+        taskId,
+        ...(nodeId ? { nodeId } : {}),
+        ...(assignmentId ? { assignmentId } : {}),
+        ...(canonicalAssignmentId ? { canonicalAssignmentId } : {}),
         workerSessionId: this.sessionId,
-        assertActive: execution.assertTaskActive ?? execution.assertActive,
-        assertAccessActive: execution.assertActive,
+        assertActive: execution.assertTaskActive ?? assertAccessActive,
+        assertAccessActive,
         ...(bounded(execution.accessProfileId, 32) ? { accessProfileId: execution.accessProfileId } : {}),
         ...(Array.isArray(execution.networkHosts) ? { networkHosts: [...execution.networkHosts] } : {}),
         ...(execution.taskScoped === true ? { taskScoped: true } : {}),
@@ -286,7 +323,24 @@ export class AgentHarnessWorker {
       return { status: 'completed', result }
     } catch (error) {
       this.dsh.observeResult(exec, { isError: true })
-      return { status: 'failed', reason: bounded(error?.code, 128) ? error.code : 'WORKER_TOOL_FAILED' }
+      // Only the runtime-owned check that failed before executor entry is a
+      // known denial. An executor cannot forge this status with a public code
+      // after entry, even when the same code names the lease failure.
+      if (TRUSTED_PRE_ENTRY_LEASE_DENIALS.has(error)) {
+        return { status: 'failed', reason: error.code }
+      }
+      // The executor was entered, so an exception means the effect outcome is
+      // unknown. Do not copy a provider's public dispatchState or collapse it
+      // into an ordinary failed result: the bounded loop must halt rather than
+      // asking the model to repeat a potentially-mutating tool call.
+      return {
+        status: 'unknown',
+        reason: 'WORKER_TOOL_OUTCOME_UNKNOWN',
+        dispatchState: 'unknown',
+        operationId: callId,
+        tool: name,
+        executionScope: { taskId, nodeId, assignmentId, canonicalAssignmentId },
+      }
     }
   }
 

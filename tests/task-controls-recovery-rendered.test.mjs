@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { chromium } from 'playwright'
 import { createServer } from 'vite'
 
-async function fixture(t, { section = 'Work', status = 'completed', handler, stateHandler } = {}) {
+async function fixture(t, { section = 'Work', status = 'completed', handler, stateHandler, routing = null } = {}) {
   // Browser plugin unavailable: real React/API client with isolated fixture
   // HTTP responses. Never execute a live continuation or cancellation.
   const server = await createServer({ configFile: new URL('../app/vite.config.js', import.meta.url).pathname,
@@ -19,7 +19,7 @@ async function fixture(t, { section = 'Work', status = 'completed', handler, sta
     browser: { running: true, tabs: [] }, activity: [], recentEvents: [], decisions: [], audit: { valid: true },
     models: { selected: { providerId: 'fixture', model: 'fixture' }, providers: [] }, auth: { codex: { connected: true } },
     agents: { specialists: [] }, conversations: { channels: [], messages: [] },
-    tasks: [{ taskId: 'alpha', projectId: 'project', objective: 'First review', status }, { taskId: 'beta', projectId: 'project', objective: 'Second review', status: 'completed' }],
+    tasks: [{ taskId: 'alpha', projectId: 'project', objective: 'First review', status, ...(routing ? { routing } : {}) }, { taskId: 'beta', projectId: 'project', objective: 'Second review', status: 'completed' }],
     projects: { projects: [{ projectId: 'project', name: 'Fixture project', defaultBranch: 'main', networkHosts: [], source: { type: 'local', path: '/fixture/project' } }], sessions: [], leases: [] },
   }
   page.on('pageerror', error => errors.push(error.message))
@@ -103,6 +103,22 @@ for (const scenario of [
   assert.deepEqual(errors, [])
 })
 
+test('task controls render a bounded no-route explanation and rejected candidates', { timeout: 20000 }, async t => {
+  const { controls, errors } = await fixture(t, {
+    routing: {
+      schema: 'chimera.routing-explanation.v1', taskId: 'alpha', selected: null,
+      reasons: ['NO_ELIGIBLE_MODEL_ROUTE'], evidence: { status: 'unknown' },
+      candidates: [{ routeId: 'fixture-pinned', model: 'fixture-pinned', status: 'rejected', details: ['agent pin is not satisfied'] }],
+      observedAt: '2026-09-19T00:00:00.000Z',
+    },
+  })
+  await controls.getByText(/No eligible model route was available/).waitFor()
+  assert.match(await controls.innerText(), /NO_ELIGIBLE_MODEL_ROUTE/)
+  await controls.getByText('Rejected routing candidates', { exact: true }).click()
+  assert.match(await controls.innerText(), /agent pin is not satisfied/)
+  assert.deepEqual(errors, [])
+})
+
 test('same-turn continuation submits once and its response preserves newer draft text', { timeout: 20000 }, async t => {
   const pending = gate(t)
   const { controls, calls, errors } = await fixture(t, { handler: async ({ route, path }) => {
@@ -119,6 +135,52 @@ test('same-turn continuation submits once and its response preserves newer draft
   await controls.getByText('Explicit continuation queued; previous effects will not be replayed automatically', { exact: true }).waitFor()
   assert.equal(await controls.getByRole('textbox', { name: 'Continuation objective' }).inputValue(), 'Newer unsent draft')
   assert.deepEqual(calls.find(call => call.path === '/api/tasks/continue').body, { taskId: 'alpha', objective: 'Original objective', budget: { maxTurns: 64, maxToolCalls: 48 } })
+  assert.deepEqual(errors, [])
+})
+
+test('continuation routing preference is scoped with the draft and submitted snapshot', { timeout: 20000 }, async t => {
+  const { controls, calls, errors } = await fixture(t, { handler: async ({ route, path }) => {
+    if (path !== '/api/tasks/continue') return false
+    await route.fulfill({ json: { taskId: 'continued' } }); return true
+  } })
+  await controls.getByRole('textbox', { name: 'Continuation objective' }).fill('Use observed latency for this continuation')
+  await controls.getByRole('combobox', { name: 'Continuation routing preference' }).selectOption('latency')
+  await controls.getByRole('button', { name: 'Continue task', exact: true }).click()
+  await controls.getByText('Explicit continuation queued; previous effects will not be replayed automatically', { exact: true }).waitFor()
+  assert.deepEqual(calls.find(call => call.path === '/api/tasks/continue').body, {
+    taskId: 'alpha', objective: 'Use observed latency for this continuation', budget: { maxTurns: 32, maxToolCalls: 24 }, requirements: { priorityPreset: 'latency' },
+  })
+  assert.equal(await controls.getByRole('combobox', { name: 'Continuation routing preference' }).inputValue(), 'latency')
+  assert.deepEqual(errors, [])
+})
+
+test('accepted continuation preserves a newer routing-only draft through reload', { timeout: 20000 }, async t => {
+  const pending = gate(t)
+  const { page, controls, calls, errors } = await fixture(t, { handler: async ({ route, path }) => {
+    if (path !== '/api/tasks/continue') return false
+    pending.arrive()
+    await pending.wait
+    await route.fulfill({ json: { taskId: 'continued' } })
+    return true
+  } })
+  const routing = controls.getByRole('combobox', { name: 'Continuation routing preference' })
+  await controls.getByRole('textbox', { name: 'Continuation objective' }).fill('Keep this submitted objective')
+  await routing.selectOption('latency')
+  await controls.getByRole('button', { name: 'Continue task', exact: true }).click()
+  await pending.arrived
+  await routing.selectOption('quality')
+  pending.release()
+  await controls.getByText('Explicit continuation queued; previous effects will not be replayed automatically', { exact: true }).waitFor()
+  assert.equal(await controls.getByRole('textbox', { name: 'Continuation objective' }).inputValue(), 'Keep this submitted objective')
+  assert.equal(await routing.inputValue(), 'quality')
+  assert.deepEqual(calls.find(call => call.path === '/api/tasks/continue').body.requirements, { priorityPreset: 'latency' })
+  await page.reload()
+  await page.getByRole('button', { name: 'Work', exact: true }).click()
+  const reloaded = page.getByRole('region', { name: 'Task recovery and control', exact: true })
+  await reloaded.getByRole('combobox', { name: 'Task to control' }).selectOption('alpha')
+  assert.equal(await reloaded.getByRole('textbox', { name: 'Continuation objective' }).inputValue(), 'Keep this submitted objective')
+  assert.equal(await reloaded.getByRole('combobox', { name: 'Continuation routing preference' }).inputValue(), 'quality')
+  assert.equal(calls.filter(call => call.path === '/api/tasks/continue').length, 1)
   assert.deepEqual(errors, [])
 })
 
@@ -150,6 +212,49 @@ for (const section of ['Work', 'Projects']) test(`${section} selection keeps in-
   assert.deepEqual(errors, [])
 })
 
+test('Stop remains independently available when recovery storage is at its bound', { timeout: 20000 }, async t => {
+  const { page, controls, calls, errors } = await fixture(t, {
+    status: 'running',
+    stateHandler: async ({ state }) => { state.tasks[0].destinationRevision = 1; return false },
+    handler: async ({ route, path }) => {
+      if (path !== '/api/tasks/cancel') return false
+      await route.fulfill({ json: { taskId: 'alpha', status: 'cancelled' } })
+      return true
+    },
+  })
+  await page.evaluate(() => {
+    for (let index = 0; index < 50; index += 1) {
+      sessionStorage.setItem(`chimera.task-control-receipt.v1:legacy:full-${index}`, JSON.stringify({ requestId: `full-${index}`, taskId: `other-${index}`, action: 'steer' }))
+    }
+  })
+  await controls.getByRole('button', { name: 'Stop task', exact: true }).click()
+  await controls.getByRole('status').filter({ hasText: /Task cancelled/ }).waitFor()
+  assert.deepEqual(calls.filter(call => call.path === '/api/tasks/cancel').map(call => call.body), [{ taskId: 'alpha' }])
+  assert.deepEqual(errors, [])
+})
+
+test('Task guidance is not dispatched when its recovery receipt cannot be persisted', { timeout: 20000 }, async t => {
+  const { page, controls, calls, errors } = await fixture(t, {
+    status: 'running',
+    stateHandler: async ({ state }) => { state.tasks[0].destinationRevision = 1; return false },
+    handler: async ({ route, path }) => {
+      if (path !== '/api/tasks/steer') return false
+      await route.fulfill({ json: { taskId: 'alpha', status: 'accepted' } })
+      return true
+    },
+  })
+  await page.evaluate(() => {
+    for (let index = 0; index < 50; index += 1) {
+      sessionStorage.setItem(`chimera.task-control-receipt.v1:legacy:full-${index}`, JSON.stringify({ requestId: `full-${index}`, taskId: `other-${index}`, action: 'steer' }))
+    }
+  })
+  await controls.getByRole('textbox', { name: 'Task guidance', exact: true }).fill('Do not dispatch without recovery')
+  await controls.getByRole('button', { name: 'Guide task', exact: true }).click()
+  await controls.getByRole('alert').filter({ hasText: /This action was not sent/i }).waitFor()
+  assert.equal(calls.some(call => call.path === '/api/tasks/steer'), false)
+  assert.deepEqual(errors, [])
+})
+
 test('failed continuation remains actionable without losing its draft or replaying the request', { timeout: 20000 }, async t => {
   const { page, controls, calls, errors } = await fixture(t, { handler: async ({ route, path }) => {
     if (path !== '/api/tasks/continue') return false
@@ -171,6 +276,300 @@ test('failed continuation remains actionable without losing its draft or replayi
   await page.screenshot({ path: '/tmp/chimera-task-recovery-mobile.png' })
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
   assert.equal(await page.locator('vite-error-overlay').count(), 0)
+  assert.deepEqual(errors, [])
+})
+
+test('ambiguous task control survives reload and resolves through its exact durable receipt without replay', { timeout: 20000 }, async t => {
+  let requestId = null
+  const { page, controls, calls, errors } = await fixture(t, {
+    stateHandler: async ({ route, state }) => {
+      state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }
+      state.tasks[0].destinationRevision = 1
+      return false
+    },
+    handler: async ({ route, path, body }) => {
+      if (path === '/api/tasks/continue') {
+        requestId = body.requestId
+        await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+        return true
+      }
+      if (path === `/api/tasks/receipts/${encodeURIComponent(requestId)}`) {
+        await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId, operation: 'continuation', taskId: 'child-continuation', parentTaskId: 'alpha', status: 'accepted' } })
+        return true
+      }
+      return false
+    },
+  })
+  await controls.getByRole('textbox', { name: 'Continuation objective' }).fill('Resolve this exact continuation')
+  await controls.getByRole('button', { name: 'Continue task', exact: true }).click()
+  await controls.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  assert.equal(calls.filter(call => call.path === '/api/tasks/continue').length, 1)
+  await page.reload()
+  await page.getByRole('button', { name: 'Work', exact: true }).click()
+  await controls.getByRole('button', { name: 'Check saved outcome', exact: true }).waitFor()
+  await controls.getByRole('button', { name: 'Check saved outcome', exact: true }).click()
+  await controls.getByRole('status').filter({ hasText: /Explicit continuation queued/ }).waitFor()
+  assert.equal(calls.filter(call => call.path === '/api/tasks/continue').length, 1)
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('accepted task receipt clears only the unchanged submitted continuation after exact lookup', { timeout: 20000 }, async t => {
+  let requestId = null
+  const { page, controls, calls, errors } = await fixture(t, {
+    stateHandler: async ({ state }) => { state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }; state.tasks[0].destinationRevision = 1; return false },
+    handler: async ({ route, path, body }) => {
+      if (path === '/api/tasks/continue') {
+        requestId = body.requestId
+        await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+        return true
+      }
+      if (path === `/api/tasks/receipts/${encodeURIComponent(requestId)}`) {
+        await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId, operation: 'continuation', taskId: 'child-continuation', parentTaskId: 'alpha', status: 'accepted' } })
+        return true
+      }
+      return false
+    },
+  })
+  const objective = controls.getByRole('textbox', { name: 'Continuation objective' })
+  await objective.fill('Clear after accepted recovery')
+  await controls.getByRole('button', { name: 'Continue task', exact: true }).click()
+  await controls.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  await page.reload()
+  await page.getByRole('button', { name: 'Work', exact: true }).click()
+  await controls.getByRole('button', { name: 'Check saved outcome', exact: true }).click()
+  await controls.getByRole('status').filter({ hasText: /Explicit continuation queued/ }).waitFor()
+  assert.equal(await controls.getByRole('textbox', { name: 'Continuation objective' }).inputValue(), '')
+  assert.equal(calls.filter(call => call.path === '/api/tasks/continue').length, 1)
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('accepted task lookup preserves a newer draft entered while the exact receipt is pending', { timeout: 20000 }, async t => {
+  let requestId = null
+  const lookup = gate(t)
+  const { page, controls, calls, errors } = await fixture(t, {
+    stateHandler: async ({ state }) => { state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }; state.tasks[0].destinationRevision = 1; return false },
+    handler: async ({ route, path, body }) => {
+      if (path === '/api/tasks/continue') {
+        requestId = body.requestId
+        await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+        return true
+      }
+      if (path === `/api/tasks/receipts/${encodeURIComponent(requestId)}`) {
+        lookup.arrive()
+        await lookup.wait
+        await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId, operation: 'continuation', taskId: 'child-continuation', parentTaskId: 'alpha', status: 'accepted' } })
+        return true
+      }
+      return false
+    },
+  })
+  const objective = controls.getByRole('textbox', { name: 'Continuation objective' })
+  await objective.fill('Original continuation objective')
+  await controls.getByRole('button', { name: 'Continue task', exact: true }).click()
+  await controls.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  await controls.getByRole('button', { name: 'Check saved outcome', exact: true }).click()
+  await lookup.arrived
+  await objective.fill('Newer continuation draft')
+  lookup.release()
+  await controls.getByRole('status').filter({ hasText: /Explicit continuation queued/ }).waitFor()
+  assert.equal(await objective.inputValue(), 'Newer continuation draft')
+  await page.reload()
+  await page.getByRole('button', { name: 'Work', exact: true }).click()
+  assert.equal(await page.getByRole('textbox', { name: 'Continuation objective' }).inputValue(), 'Newer continuation draft')
+  assert.equal(calls.filter(call => call.path === '/api/tasks/continue').length, 1)
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('parallel task receipt checks are single-flight and cannot erase a replacement receipt', { timeout: 20000 }, async t => {
+  let requestId = null
+  let lookupCount = 0
+  let releaseFirstLookup
+  let releaseSecondLookup
+  let resolveFirstLookup
+  let resolveSecondLookup
+  const firstLookupArrived = new Promise(resolve => { resolveFirstLookup = resolve })
+  const secondLookupArrived = new Promise(resolve => { resolveSecondLookup = resolve })
+  const firstLookupRelease = new Promise(resolve => { releaseFirstLookup = resolve })
+  const secondLookupRelease = new Promise(resolve => { releaseSecondLookup = resolve })
+  t.after(() => { releaseFirstLookup?.(); releaseSecondLookup?.() })
+  const { page, controls, calls, errors } = await fixture(t, {
+    stateHandler: async ({ state }) => { state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }; state.tasks[0].destinationRevision = 1; return false },
+    handler: async ({ route, path, body }) => {
+      if (path === '/api/tasks/continue') {
+        requestId = body.requestId
+        await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+        return true
+      }
+      if (path.startsWith('/api/tasks/receipts/')) {
+        lookupCount += 1
+        if (lookupCount === 1) resolveFirstLookup()
+        else resolveSecondLookup()
+        await (lookupCount === 1 ? firstLookupRelease : secondLookupRelease)
+        await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId: decodeURIComponent(path.split('/').pop()), operation: 'continuation', taskId: 'child-continuation', parentTaskId: 'alpha', status: 'accepted' } })
+        return true
+      }
+      return false
+    },
+  })
+  const objective = controls.getByRole('textbox', { name: 'Continuation objective' })
+  await objective.fill('Original continuation objective')
+  await controls.getByRole('button', { name: 'Continue task', exact: true }).click()
+  await controls.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  const check = controls.getByRole('button', { name: 'Check saved outcome', exact: true })
+  await check.click()
+  await check.click()
+  await firstLookupArrived
+  releaseFirstLookup()
+  await controls.getByRole('status').filter({ hasText: /Explicit continuation queued/ }).waitFor()
+  await objective.fill('Replacement continuation R2')
+  await controls.getByRole('button', { name: 'Continue task', exact: true }).click()
+  await controls.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  // Before the fix the duplicate GET remains in flight and can remove the R2
+  // key after the operator has created it. The fixed path is single-flight.
+  await Promise.race([secondLookupArrived, new Promise(resolve => setTimeout(resolve, 500))])
+  assert.equal(lookupCount, 1, 'two rapid checks share one exact receipt GET')
+  if (lookupCount > 1) releaseSecondLookup()
+  await page.reload()
+  await page.getByRole('button', { name: 'Work', exact: true }).click()
+  await controls.getByRole('button', { name: 'Check saved outcome', exact: true }).waitFor()
+  assert.equal(await controls.getByRole('textbox', { name: 'Continuation objective' }).inputValue(), 'Replacement continuation R2')
+  assert.equal(calls.filter(call => call.path === '/api/tasks/continue').length, 2)
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('task lookup from an unmounted view uses the session draft and preserves newer objective and budget', { timeout: 20000 }, async t => {
+  let requestId = null
+  const lookup = gate(t)
+  const { page, controls, calls, errors } = await fixture(t, {
+    stateHandler: async ({ state }) => { state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }; state.tasks[0].destinationRevision = 1; return false },
+    handler: async ({ route, path, body }) => {
+      if (path === '/api/tasks/continue') {
+        requestId = body.requestId
+        await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+        return true
+      }
+      if (path === `/api/tasks/receipts/${encodeURIComponent(requestId)}`) {
+        lookup.arrive()
+        await lookup.wait
+        await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId, operation: 'continuation', taskId: 'child-continuation', parentTaskId: 'alpha', status: 'accepted' } })
+        return true
+      }
+      return false
+    },
+  })
+  const objective = controls.getByRole('textbox', { name: 'Continuation objective' })
+  await objective.fill('Original continuation objective')
+  await controls.getByRole('combobox', { name: 'Continuation budget' }).selectOption('extended')
+  await controls.getByRole('button', { name: 'Continue task', exact: true }).click()
+  await controls.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  await controls.getByRole('button', { name: 'Check saved outcome', exact: true }).click()
+  await lookup.arrived
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await page.getByRole('button', { name: 'Work', exact: true }).click()
+  const remounted = page.getByRole('region', { name: 'Task recovery and control', exact: true })
+  await remounted.getByRole('textbox', { name: 'Continuation objective' }).fill('Newer continuation after remount')
+  await remounted.getByRole('combobox', { name: 'Continuation budget' }).selectOption('standard')
+  lookup.release()
+  await remounted.getByRole('status').filter({ hasText: /Explicit continuation queued/ }).waitFor()
+  await page.reload()
+  await page.getByRole('button', { name: 'Work', exact: true }).click()
+  const restored = page.getByRole('region', { name: 'Task recovery and control', exact: true })
+  assert.equal(await restored.getByRole('textbox', { name: 'Continuation objective' }).inputValue(), 'Newer continuation after remount')
+  assert.equal(await restored.getByRole('combobox', { name: 'Continuation budget' }).inputValue(), 'standard')
+  assert.equal(calls.filter(call => call.path === '/api/tasks/continue').length, 1)
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('Stop remains the latest task notice while a prior receipt lookup settles', { timeout: 20000 }, async t => {
+  let requestId = null
+  let markLookupSettled
+  const lookupSettled = new Promise(resolve => { markLookupSettled = resolve })
+  const lookup = gate(t)
+  const { controls, calls, errors } = await fixture(t, {
+    status: 'running',
+    stateHandler: async ({ state }) => { state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }; state.tasks[0].destinationRevision = 1; return false },
+    handler: async ({ route, path, body, state }) => {
+      if (path === '/api/tasks/steer') {
+        requestId = body.requestId
+        await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+        return true
+      }
+      if (path === `/api/tasks/receipts/${encodeURIComponent(requestId)}`) {
+        lookup.arrive()
+        await lookup.wait
+        await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId, operation: 'task-steer', taskId: 'alpha', status: 'accepted' } })
+        markLookupSettled()
+        return true
+      }
+      if (path === '/api/tasks/cancel') {
+        state.tasks[0].status = 'cancelled'
+        await route.fulfill({ json: { taskId: 'alpha', status: 'cancelled' } })
+        return true
+      }
+      return false
+    },
+  })
+  await controls.getByRole('textbox', { name: 'Task guidance' }).fill('Guidance before stop')
+  await controls.getByRole('button', { name: 'Guide task', exact: true }).click()
+  await controls.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  await controls.getByRole('button', { name: 'Check saved outcome', exact: true }).click()
+  await lookup.arrived
+  await controls.getByRole('button', { name: 'Stop task', exact: true }).click()
+  await controls.getByText('Task cancelled. Already-started effects cannot be undone.', { exact: true }).waitFor()
+  lookup.release()
+  await lookupSettled
+  await controls.getByText('Task cancelled. Already-started effects cannot be undone.', { exact: true }).waitFor()
+  assert.equal(await controls.getByText('Guidance saved for next safe boundary', { exact: true }).count(), 0)
+  assert.equal(calls.filter(call => call.path === '/api/tasks/cancel').length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('Stop remains the latest task notice when a prior receipt lookup fails', { timeout: 20000 }, async t => {
+  let requestId = null
+  let markLookupSettled
+  const lookupSettled = new Promise(resolve => { markLookupSettled = resolve })
+  const lookup = gate(t)
+  const { controls, calls, errors } = await fixture(t, {
+    status: 'running',
+    stateHandler: async ({ state }) => { state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }; state.tasks[0].destinationRevision = 1; return false },
+    handler: async ({ route, path, body, state }) => {
+      if (path === '/api/tasks/steer') {
+        requestId = body.requestId
+        await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+        return true
+      }
+      if (path === `/api/tasks/receipts/${encodeURIComponent(requestId)}`) {
+        lookup.arrive()
+        await lookup.wait
+        await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId, operation: 'task-steer', taskId: 'alpha', status: 'failed', reason: 'The task was no longer active.' } })
+        markLookupSettled()
+        return true
+      }
+      if (path === '/api/tasks/cancel') {
+        state.tasks[0].status = 'cancelled'
+        await route.fulfill({ json: { taskId: 'alpha', status: 'cancelled' } })
+        return true
+      }
+      return false
+    },
+  })
+  await controls.getByRole('textbox', { name: 'Task guidance' }).fill('Guidance before failed lookup')
+  await controls.getByRole('button', { name: 'Guide task', exact: true }).click()
+  await controls.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  await controls.getByRole('button', { name: 'Check saved outcome', exact: true }).click()
+  await lookup.arrived
+  await controls.getByRole('button', { name: 'Stop task', exact: true }).click()
+  await controls.getByText('Task cancelled. Already-started effects cannot be undone.', { exact: true }).waitFor()
+  lookup.release()
+  await lookupSettled
+  await controls.getByText('Task cancelled. Already-started effects cannot be undone.', { exact: true }).waitFor()
+  assert.equal(await controls.getByText(/The task was no longer active\.|Guidance saved for next safe boundary/, { exact: false }).count(), 0)
+  assert.equal(calls.filter(call => call.path === '/api/tasks/cancel').length, 1)
   assert.deepEqual(errors, [])
 })
 
@@ -199,8 +598,29 @@ test('Stop stays available during pending guidance and a late guidance failure c
   assert.deepEqual(errors, [])
 })
 
+test('a late guidance success cannot replace a newer accepted Stop acknowledgement', { timeout: 20000 }, async t => {
+  const pending = gate(t)
+  const { controls, calls, errors } = await fixture(t, { status: 'running', handler: async ({ route, path, state }) => {
+    if (path === '/api/tasks/steer') { pending.arrive(); await pending.wait; await route.fulfill({ json: { taskId: 'alpha', status: 'accepted' } }); return true }
+    if (path === '/api/tasks/cancel') { state.tasks[0].status = 'cancelled'; await route.fulfill({ json: state.tasks[0] }); return true }
+    return false
+  } })
+  await controls.getByRole('textbox', { name: 'Task guidance' }).fill('Guidance that finishes after Stop')
+  await controls.getByRole('button', { name: 'Guide task', exact: true }).click()
+  await pending.arrived
+  await controls.getByRole('button', { name: 'Stop task', exact: true }).click()
+  await controls.getByText('Task cancelled. Already-started effects cannot be undone.', { exact: true }).waitFor()
+  pending.release()
+  await controls.getByText('Task cancelled. Already-started effects cannot be undone.', { exact: true }).waitFor()
+  assert.equal(await controls.getByText('Guidance saved for next safe boundary', { exact: true }).count(), 0)
+  assert.equal(calls.filter(call => call.path === '/api/tasks/steer').length, 1)
+  assert.equal(calls.filter(call => call.path === '/api/tasks/cancel').length, 1)
+  assert.deepEqual(errors, [])
+})
+
 test('task drafts and budget follow their exact task across Queue, Browser and Projects', { timeout: 20000 }, async t => {
-  // A view-local draft or a key shared by different tasks loses/misattributes text.
+  // A key shared by different tasks loses/misattributes text; the exact draft
+  // is also retained in the workspace-scoped local recovery store.
   const { page, controls, calls, errors } = await fixture(t)
   await controls.getByRole('textbox', { name: 'Continuation objective' }).fill('Alpha review follow-up')
   await controls.getByRole('combobox', { name: 'Continuation budget' }).selectOption('extended')
@@ -221,7 +641,8 @@ test('task drafts and budget follow their exact task across Queue, Browser and P
   assert.equal(calls.filter(call => call.body).length, 0, 'navigation never submits a saved draft')
   await page.reload()
   await page.getByRole('button', { name: 'Work', exact: true }).click()
-  assert.equal(await controls.getByRole('textbox', { name: 'Continuation objective' }).inputValue(), '', 'drafts are not stored across page reloads')
+  assert.equal(await controls.getByRole('textbox', { name: 'Continuation objective' }).inputValue(), 'Alpha review follow-up', 'the exact task draft survives page reload')
+  assert.equal(await controls.getByRole('combobox', { name: 'Continuation budget' }).inputValue(), 'extended')
   assert.deepEqual(errors, [])
 })
 

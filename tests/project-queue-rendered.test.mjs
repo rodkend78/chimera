@@ -15,9 +15,10 @@ test('project UI queues while work runs and exposes explicit recovery resume on 
   const calls = [], errors = []
   const state = {
     agent: { id: 'ceo', name: 'RJ', status: 'Working' }, controller: { type: 'agent', id: 'ceo' }, suspended: false,
+    draftScope: { schema: 'chimera.draft-scope.v1', workspaceId: 'project-queue-fixture', operatorId: 'operator-fixture' },
     browser: { running: true, tabs: [] }, activity: [], recentEvents: [], decisions: [], audit: { valid: true },
     models: { selected: { providerId: 'fixture', model: 'fixture' }, providers: [] }, auth: { codex: { connected: true } },
-    agents: { specialists: [] }, conversations: { channels: [], messages: [] },
+    agents: { main: { agentId: 'ceo', displayName: 'RJ', role: 'CEO' }, specialists: [] }, conversations: { channels: [], messages: [] },
     tasks: [{ taskId: 'paused', projectId: 'project-one', objective: 'Resume reviewed research', status: 'queued', queuedForExecution: true, recoveryRequired: true },
       { taskId: 'running', projectId: 'project-one', objective: 'Current project work', status: 'running' }],
     projects: { projects: [{ projectId: 'project-one', name: 'Website project', defaultBranch: 'main', networkHosts: [], source: { type: 'local', path: '/fixture/site' } }], sessions: [], leases: [] },
@@ -33,6 +34,9 @@ test('project UI queues while work runs and exposes explicit recovery resume on 
       if (path === '/api/state') return route.fulfill({ json: state })
       const body = route.request().method() === 'POST' ? route.request().postDataJSON() : null
       calls.push({ path, body })
+      if (path === '/api/tasks/steer') {
+        return route.fulfill({ json: { taskId: body.taskId, destinationRevision: body.expectedDestinationRevision ?? 1, receipt: { requestId: body.requestId, status: 'accepted', operation: 'task-steer' }, acknowledgement: 'Guidance saved for the next safe task boundary' } })
+      }
       if (path === '/api/projects/tasks') {
         const task = { ...body, taskId: 'new-job', status: 'queued', queuedForExecution: true }
         state.tasks.push(task)
@@ -48,8 +52,11 @@ test('project UI queues while work runs and exposes explicit recovery resume on 
     await page.getByRole('heading', { name: 'Website project', exact: true }).waitFor()
     await page.getByRole('button', { name: 'Expand decisions rail', exact: true }).click()
     await page.getByRole('region', { name: 'Task plan', exact: true }).getByText('Current project work', { exact: true }).waitFor()
-    await page.getByRole('textbox', { name: 'RJ queue objective' }).fill('Guide the executing job, not a waiting job')
-    await page.getByRole('button', { name: 'Guide current task', exact: true }).click()
+    const composer = page.getByRole('region', { name: 'Conversation composer', exact: true })
+    await composer.getByRole('combobox', { name: 'Conversation action', exact: true }).selectOption('guidance')
+    await composer.getByRole('combobox', { name: 'Conversation task', exact: true }).selectOption('running')
+    await composer.getByRole('textbox', { name: 'Task guidance', exact: true }).fill('Guide the executing job, not a waiting job')
+    await composer.getByRole('button', { name: 'Guide task', exact: true }).click()
     await page.getByText('Guidance saved for the next safe task boundary', { exact: true }).waitFor()
     assert.equal(calls.find(call => call.path === '/api/tasks/steer').body.taskId, 'running')
     await page.getByRole('textbox', { name: 'Objective for RJ' }).fill('A second project outcome')

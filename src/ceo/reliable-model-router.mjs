@@ -14,6 +14,30 @@ function isBoundedString(value, maximum = 4096) {
   return typeof value === 'string' && value.length > 0 && value.length <= maximum
 }
 
+function normalizeBinding(binding) {
+  if (binding === null || binding === undefined) return null
+  const rootSlots = binding?.nodeId === null && binding?.assignmentId === null
+  const specialistSlots = isBoundedString(binding?.nodeId, 128) && isBoundedString(binding?.assignmentId, 256)
+  if (!isRecord(binding)
+    || !isBoundedString(binding.taskId, 256)
+    || (!rootSlots && !specialistSlots)
+    || !isBoundedString(binding.agentId, 128)
+    || !isBoundedString(binding.stage, 128)) {
+    throw Object.assign(new TypeError('MODEL_CALL_BINDING_INVALID'), { code: 'MODEL_CALL_BINDING_INVALID' })
+  }
+  return {
+    taskId: binding.taskId,
+    nodeId: binding.nodeId,
+    assignmentId: binding.assignmentId,
+    agentId: binding.agentId,
+    stage: binding.stage,
+  }
+}
+
+function sameBinding(left, right) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
+}
+
 function failureRecord(error) {
   return {
     message: error instanceof Error ? error.message : String(error),
@@ -70,7 +94,18 @@ export class DurableModelCallLedger {
     return record ? structuredClone(record) : null
   }
 
-  async begin({ callId, requestHash, providerRouterId, scopeId }) {
+  listByTask(taskId) {
+    if (!isBoundedString(taskId, 256)) return []
+    return [...this.#records.values()]
+      .filter(record => record.binding?.taskId === taskId)
+      .map(record => structuredClone(record))
+  }
+
+  listByTaskSync(taskId) {
+    return this.listByTask(taskId)
+  }
+
+  async begin({ callId, requestHash, providerRouterId, scopeId, binding = null }) {
     return this.#write(async () => {
       if (!isBoundedString(callId, 256)
         || !isBoundedString(requestHash, 128)
@@ -78,7 +113,9 @@ export class DurableModelCallLedger {
         || !isBoundedString(scopeId, 256)) {
         throw new TypeError('invalid model call identity')
       }
+      const normalizedBinding = normalizeBinding(binding)
       const prior = this.#records.get(callId)
+      if (prior && !sameBinding(prior.binding, normalizedBinding)) throw new Error('MODEL_CALL_BINDING_COLLISION')
       if (prior?.status === 'succeeded') return structuredClone(prior)
       if (prior?.status === 'started' || prior?.status === 'ambiguous') {
         throw new ModelCallOutcomeUnknownError(callId, errorFromFailure(prior.failure))
@@ -96,6 +133,7 @@ export class DurableModelCallLedger {
         attempt: (prior?.attempt ?? 0) + 1,
         status: 'started',
         startedAt: at,
+        ...(normalizedBinding ? { binding: normalizedBinding } : {}),
       }
       await this.#append({ event: 'started', at, record })
       this.#records.set(callId, record)
@@ -193,11 +231,12 @@ export class DurableModelCallLedger {
         || record.attempt < 1) {
         throw new TypeError('invalid model call start event')
       }
+      const binding = record.binding === undefined ? null : normalizeBinding(record.binding)
       const prior = this.#records.get(record.callId)
       if (prior && prior.status !== 'failed-not-sent') {
         throw new TypeError('model call start does not follow a retryable failure')
       }
-      this.#records.set(record.callId, structuredClone(record))
+      this.#records.set(record.callId, { ...structuredClone(record), ...(binding ? { binding } : {}) })
       return
     }
     const current = this.#records.get(event.callId)
@@ -232,6 +271,7 @@ export function createReliableModelRouter({
   ledger,
   audit,
   now = () => Date.now(),
+  bindingFor = null,
 }) {
   const routed = validateModelRouter(provider)
   if (!ledger || typeof ledger.lookup !== 'function' || typeof ledger.begin !== 'function') {
@@ -241,10 +281,19 @@ export function createReliableModelRouter({
   if (!isBoundedString(scopeId, 256) || typeof routed.authorize !== 'function') {
     throw new TypeError('reliable model router requires an authorizing gateway model router')
   }
+  if (bindingFor !== null && typeof bindingFor !== 'function') throw new TypeError('MODEL_CALL_BINDING_INVALID')
   const inFlight = new Map()
 
-  async function execute(callId, requestHash, prompt, context) {
-    const authorized = await routed.authorize(prompt, structuredClone(context))
+  async function resolveBinding(callId, prompt, context, controls) {
+    const suppliedBinding = bindingFor
+      ? await bindingFor({ callId, prompt, context: structuredClone(context), controls })
+      : (controls?.binding ?? null)
+    return normalizeBinding(suppliedBinding)
+  }
+
+  async function execute(callId, requestHash, prompt, context, controls, bindingPromise) {
+    const binding = await bindingPromise
+    const authorized = await routed.authorize(prompt, structuredClone(context), controls)
     if (!authorized
       || authorized.authorizationScope !== scopeId
       || authorized.requestHash !== requestHash
@@ -255,6 +304,7 @@ export function createReliableModelRouter({
     if (prior && (prior.requestHash !== requestHash || prior.scopeId !== scopeId)) {
       throw new Error('MODEL_CALL_ID_COLLISION')
     }
+    if (prior && !sameBinding(prior.binding, binding)) throw new Error('MODEL_CALL_BINDING_COLLISION')
     if (prior?.status === 'succeeded') {
       audit?.append({
         kind: 'model.call.replayed',
@@ -270,7 +320,7 @@ export function createReliableModelRouter({
       throw new ModelCallOutcomeUnknownError(callId, errorFromFailure(prior.failure))
     }
 
-    await ledger.begin({ callId, requestHash, providerRouterId: routed.routerId, scopeId })
+    await ledger.begin({ callId, requestHash, providerRouterId: routed.routerId, scopeId, binding })
     try {
       const result = await authorized.dispatch()
       return await ledger.succeed(callId, result)
@@ -284,7 +334,12 @@ export function createReliableModelRouter({
   return validateModelRouter(Object.freeze({
     routerId: `reliable:${routed.routerId}`,
     authorizationScope: scopeId,
-    route(prompt, context = {}) {
+    ...(typeof routed.explain === 'function' ? {
+      // Preserve the pure routing projection through the reliability wrapper;
+      // explanation never enters the durable model-call hash or dispatch path.
+      explain: (...args) => routed.explain(...args),
+    } : {}),
+    route(prompt, context = {}, controls = undefined) {
       const requestHash = sha256({ prompt, context })
       const callId = `model-${sha256({
         providerRouterId: routed.routerId,
@@ -292,10 +347,22 @@ export function createReliableModelRouter({
         scopeId,
       }).slice(0, 32)}`
       const active = inFlight.get(callId)
-      if (active) return active
-      const operation = execute(callId, requestHash, prompt, context)
-        .finally(() => inFlight.delete(callId))
-      inFlight.set(callId, operation)
+      if (active) {
+        // The logical call hash intentionally excludes runtime controls, but
+        // a concurrent caller must still prove the same effective binding
+        // before it can share the already-dispatched operation.
+        const requestedBinding = resolveBinding(callId, prompt, context, controls)
+        return Promise.all([active.bindingPromise, requestedBinding]).then(([activeBinding, candidateBinding]) => {
+          if (!sameBinding(activeBinding, candidateBinding)) throw new Error('MODEL_CALL_BINDING_COLLISION')
+          return active.operation
+        })
+      }
+      const bindingPromise = resolveBinding(callId, prompt, context, controls)
+      const operation = execute(callId, requestHash, prompt, context, controls, bindingPromise)
+        .finally(() => {
+          if (inFlight.get(callId)?.operation === operation) inFlight.delete(callId)
+        })
+      inFlight.set(callId, { operation, bindingPromise })
       return operation
     },
   }))

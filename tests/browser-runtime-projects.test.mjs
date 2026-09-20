@@ -186,11 +186,66 @@ test('RJ staffs an imported agent into an isolated project task, revokes its lea
       const review = await runtime.projectReview(submitted.taskId)
       assert.deepEqual(review.changedFiles.map(({ path }) => path), ['agent.txt'])
       assert.match(review.patch, /implemented by Ace/)
+      const projectSession = runtime.projectSessions.get(submitted.taskId)
+      const checkResult = await runtime.workerToolExecutors.bash(
+        { command: 'true' },
+        {
+          taskScoped: true,
+          taskId: submitted.taskId,
+          callId: 'bounded-check-acceptance-1',
+          agentId: 'ace',
+          accessProfileId: 'sandbox',
+          assertActive: () => true,
+          workspace: {
+            path: projectSession.workspace.path,
+            protectedWriteRoots: projectSession.workspace.protectedWriteRoots,
+            readProjectIdentity: () => runtime.projectSessions.identityReceipt(submitted.taskId),
+          },
+        },
+      )
+      assert.equal(checkResult.exitCode, 0)
+      assert.equal(typeof checkResult.evidenceReceiptId, 'string')
+      const checkEvidence = runtime.tasks.listEvidence(submitted.taskId).find(receipt => receipt.kind === 'check')
+      assert.equal(checkEvidence?.source, 'bounded-check')
+      assert.equal(checkEvidence?.outcome?.status, 'passed')
+      assert.match(checkEvidence?.outcome?.scope ?? '', /execution:worker:ace\/scratch/)
+      assert.equal(runtime.taskWorkspace(submitted.taskId).evidence.checksPassed.state, 'passed')
+      const reviewEvidence = runtime.tasks.listEvidence(submitted.taskId).find(receipt => receipt.kind === 'review')
+      assert.equal(reviewEvidence?.source, 'project-review')
+      assert.equal(reviewEvidence?.outcome?.scope, 'task:' + submitted.taskId + '/workspace:scratch/repo')
+      const reviewedWorkspace = runtime.taskWorkspace(submitted.taskId)
+      assert.equal(reviewedWorkspace.evidence.workProduced.state, 'not-produced')
+      assert.equal(reviewedWorkspace.evidence.readyForReview.state, 'ready')
+      assert.equal(reviewedWorkspace.evidence.published.state, 'not-published')
+      const acePermission = reviewedWorkspace.permissions.find(lease => lease.agentId === 'ace')
+      assert.equal(acePermission?.agentProfileId, runtime.agentAccessPolicy.get('ace').profileId)
+      assert.equal(acePermission?.tools?.includes('bash'), true)
+      const routedProviderId = 'fixture'
+      await runtime.tasks.setRouting(submitted.taskId, {
+        schema: 'chimera.routing-explanation.v1',
+        selected: { providerId: routedProviderId, agentId: 'ceo', model: 'ade', executor: 'fixture' },
+        candidates: [], reasons: [], evidence: { status: 'unknown' },
+      })
+      runtime.cachedConnectionState = [{ providerId: routedProviderId, enabled: true, status: 'not-connected', operations: {} }]
+      const recoveryClassifier = runtime.taskRecoveryClassifier
+      const originalConnectionState = runtime.connectionState
+      let observedRecoveryConnection = null
+      runtime.taskRecoveryClassifier = input => {
+        observedRecoveryConnection = input.connection
+        return recoveryClassifier(input)
+      }
+      runtime.connectionState = () => { throw new Error('TASK_WORKSPACE_MUST_NOT_REFRESH_CONNECTIONS') }
+      try { runtime.taskWorkspace(submitted.taskId) } finally {
+        runtime.taskRecoveryClassifier = recoveryClassifier
+        runtime.connectionState = originalConnectionState
+      }
+      assert.deepEqual(observedRecoveryConnection, { status: 'disconnected', connected: false, supportsReconciliation: false })
       await assert.rejects(readFile(join(source, 'agent.txt')), { code: 'ENOENT' })
 
       const delivery = await runtime.commitProjectSession({ taskId: submitted.taskId, message: 'feat: accept Ace project work', expectedReviewDigest: review.reviewDigest })
       assert.equal(delivery.status, 'committed')
       assert.equal(await readFile(join(source, 'agent.txt'), 'utf8'), 'implemented by Ace\n')
+      assert.equal(runtime.taskWorkspace(submitted.taskId).evidence.readyForReview.state, 'stale')
     } finally {
       await runtime.close()
     }
@@ -235,6 +290,11 @@ test('project queue advances FIFO without preparing queued workspaces or running
     release()
     const firstResult = await runtime.waitForTask(first.taskId)
     assert.equal(firstResult.status, 'completed', JSON.stringify(firstResult.failure))
+    const cleanReview = await runtime.projectReview(first.taskId)
+    assert.deepEqual(cleanReview.changedFiles, [])
+    const cleanReviewEvidence = runtime.tasks.listEvidence(first.taskId).find(receipt => receipt.kind === 'review')
+    assert.equal(cleanReviewEvidence?.outcome?.status, 'current')
+    assert.equal(runtime.taskWorkspace(first.taskId).evidence.readyForReview.state, 'ready')
     const thirdResult = await runtime.waitForTask(third.taskId)
     assert.equal(thirdResult.status, 'completed', JSON.stringify(thirdResult.failure))
     assert.deepEqual(planned, ['First project task', 'Third project task'])
@@ -282,10 +342,27 @@ test('shutdown retains queued jobs and restart requires an explicit project-queu
     runtime = makeRuntime()
     await runtime.start()
     const state = await runtime.state()
-    assert.equal(state.tasks.find(row => row.taskId === queued.taskId).recoveryRequired, true)
+    const recoveredQueued = state.tasks.find(row => row.taskId === queued.taskId)
+    assert.equal(recoveredQueued.recoveryRequired, true)
     assert.equal(planned.length, 1)
     assert.equal(runtime.projectSessions.get(queued.taskId), null)
-    await runtime.resumeQueuedTask({ taskId: queued.taskId })
+    const resumeRequestId = 'resume-queued-runtime'
+    const appendAudit = runtime.audit.append.bind(runtime.audit)
+    let failResumeAudit = true
+    runtime.audit.append = fact => {
+      if (failResumeAudit && fact.kind === 'ceo.task.queue-resumed') {
+        failResumeAudit = false
+        throw Object.assign(new Error('FIXTURE_RESUME_AUDIT_FAILED'), { code: 'FIXTURE_RESUME_AUDIT_FAILED' })
+      }
+      return appendAudit(fact)
+    }
+    await assert.rejects(
+      runtime.resumeQueuedTask({ taskId: queued.taskId, requestId: resumeRequestId, expectedDestinationRevision: recoveredQueued.destinationRevision }),
+      { code: 'FIXTURE_RESUME_AUDIT_FAILED' },
+    )
+    assert.equal(runtime.taskAdmissionStatus(resumeRequestId).status, 'accepted')
+    const replay = await runtime.resumeQueuedTask({ taskId: queued.taskId, requestId: resumeRequestId, expectedDestinationRevision: recoveredQueued.destinationRevision })
+    assert.equal(replay.replayed, true)
     const recovered = await runtime.waitForTask(queued.taskId)
     assert.equal(recovered.status, 'completed', JSON.stringify(recovered.failure))
     assert.deepEqual(planned, ['Stop this in-flight task', 'Resume this unstarted task'])

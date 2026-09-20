@@ -15,9 +15,10 @@ async function fixture(t, configure = () => {}) {
   page.setDefaultTimeout(5000)
   const state = {
     agent: { id: 'ceo', name: 'RJ', status: 'Working' }, controller: { type: 'agent', id: 'ceo' }, suspended: false,
+    draftScope: { schema: 'chimera.draft-scope.v1', workspaceId: 'queue-selection-fixture', operatorId: 'operator-fixture' },
     browser: { running: true, tabs: [] }, activity: [], recentEvents: [], decisions: [], audit: { valid: true },
     models: { selected: { providerId: 'fixture', model: 'fixture' }, providers: [] }, auth: { codex: { connected: true, status: 'connected' } },
-    agents: { specialists: [{ agentId: 'ace', displayName: 'Ace' }] },
+    agents: { main: { agentId: 'ceo', displayName: 'RJ', role: 'CEO' }, specialists: [{ agentId: 'ace', displayName: 'Ace' }] },
     tasks: [{ taskId: 'alpha', objective: 'Alpha website review', status: 'running' }, { taskId: 'beta', objective: 'Beta export review', status: 'queued' }],
     teamMessaging: { tasks: [{ taskId: 'alpha', eligibleRecipients: ['ace'], participants: ['ceo', 'ace'], deliveries: [] }, { taskId: 'beta', eligibleRecipients: ['ace'], participants: ['ceo', 'ace'], deliveries: [] }] },
     conversations: { channels: [
@@ -28,6 +29,22 @@ async function fixture(t, configure = () => {}) {
     ], messages: [] },
   }
   const calls = [], errors = [], older = []
+  const workspace = taskId => {
+    const task = state.tasks.find(candidate => candidate.taskId === taskId) ?? { taskId, objective: taskId, status: 'unknown' }
+    return {
+      schema: 'chimera.task-workspace.v1',
+      task,
+      plan: null,
+      team: { taskId, participants: [], deliveries: [] },
+      conversation: { conversationId: `task:${taskId}`, messages: [] },
+      permissions: [], approvals: [],
+      files: { status: 'unloaded', review: null, artifacts: [] },
+      results: { taskId, summary: null, messages: [], reports: [] },
+      browser: null, routing: null,
+      evidence: { taskId, workProduced: { state: 'not-produced' }, checksPassed: { state: 'not-run' }, readyForReview: { state: 'not-reviewed' }, published: { state: 'not-published' } },
+      recovery: { taskId, state: 'not-needed', summary: 'No recovery action is recorded.', retained: [], actions: [], retryAllowed: false },
+    }
+  }
   configure(state, older)
   page.on('pageerror', error => errors.push(error.message))
   page.on('console', message => { if (['error', 'warning'].includes(message.type())) errors.push(message.text()) })
@@ -37,6 +54,12 @@ async function fixture(t, configure = () => {}) {
     if (path === '/api/operator/session') return route.fulfill({ json: { csrfToken: 'fixture', expiresAt: new Date(Date.now() + 60000).toISOString() } })
     if (path === '/api/state') return route.fulfill({ json: state })
     const body = route.request().method() === 'POST' ? route.request().postDataJSON() : null
+    const workspacePath = path.startsWith('/api/tasks/') && path.endsWith('/workspace')
+    if (workspacePath) {
+      assert.equal(route.request().method(), 'GET', 'workspace reads must never hide a write')
+      const taskId = decodeURIComponent(path.slice('/api/tasks/'.length, -'/workspace'.length))
+      return route.fulfill({ json: workspace(taskId) })
+    }
     calls.push({ path, body })
     if (path === '/api/tasks' && !body) return route.fulfill({ json: { tasks: older, nextCursor: null } })
     if (path === '/api/conversations/messages' && !body) return route.fulfill({ json: { messages: [], nextCursor: null } })
@@ -62,15 +85,18 @@ test('choosing a Queue task room targets its controls, and the control selector 
   const { page, controls, rooms, calls, errors } = await fixture(t)
   await rooms.getByRole('button', { name: 'Beta export review Task room', exact: true }).click()
   assert.equal(await controls.getByRole('combobox', { name: 'Task to control' }).inputValue(), 'beta')
+  const composer = page.getByRole('region', { name: 'Conversation composer', exact: true })
+  await composer.getByRole('combobox', { name: 'Conversation action', exact: true }).waitFor()
+  assert.equal(await composer.getByRole('combobox', { name: 'Conversation action', exact: true }).inputValue(), 'guidance')
+  assert.equal(await composer.getByRole('combobox', { name: 'Conversation task', exact: true }).inputValue(), 'beta')
   await controls.getByRole('textbox', { name: 'Task guidance' }).fill('Inspect only the beta export')
   await controls.getByRole('button', { name: 'Guide task', exact: true }).click()
   await controls.getByText('Guidance saved for next safe boundary', { exact: true }).waitFor()
   assert.deepEqual(calls.find(call => call.path === '/api/tasks/steer').body, { taskId: 'beta', content: 'Inspect only the beta export' })
   await page.getByRole('checkbox', { name: '@Ace' }).check()
-  await page.getByRole('button', { name: 'General guidance', exact: true }).waitFor()
   await controls.getByRole('combobox', { name: 'Task to control' }).selectOption('alpha')
+  assert.equal(await composer.getByRole('combobox', { name: 'Conversation task', exact: true }).inputValue(), 'alpha')
   assert.match(await page.locator('.chat-thread-header').innerText(), /Alpha website review/)
-  assert.equal(await page.getByRole('button', { name: 'General guidance', exact: true }).count(), 0, 'changing task must clear the old room address')
   assert.equal(await page.getByRole('checkbox', { name: '@Ace' }).isChecked(), false)
   const betaObjective = page.getByLabel('RJ queue', { exact: true }).getByRole('button', { name: 'Beta export review queued', exact: true })
   await betaObjective.click()

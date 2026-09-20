@@ -189,6 +189,24 @@ function identityOf(exec) {
   return { agentId, sessionId }
 }
 
+function executionScopeOf(exec) {
+  const input = exec?.executionScope
+  if (input === undefined || input === null) return { taskId: null, nodeId: null, assignmentId: null, canonicalAssignmentId: null }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new TypeError('DSH_EXECUTION_SCOPE_INVALID')
+  const taskId = input.taskId ?? null
+  const nodeId = input.nodeId ?? null
+  const assignmentId = input.assignmentId ?? null
+  const canonicalAssignmentId = input.canonicalAssignmentId ?? null
+  if ((taskId !== null && !isBoundedString(taskId, 256))
+    || (nodeId !== null && !isBoundedString(nodeId, 128))
+    || (assignmentId !== null && !isBoundedString(assignmentId, 256))
+    || (canonicalAssignmentId !== null && !isBoundedString(canonicalAssignmentId, 256))
+    || (nodeId !== null && taskId === null)
+    || (assignmentId !== null && taskId === null)
+    || (canonicalAssignmentId !== null && taskId === null)) throw new TypeError('DSH_EXECUTION_SCOPE_INVALID')
+  return { taskId, nodeId, assignmentId, canonicalAssignmentId }
+}
+
 function callIdentity(exec, parentCallId) {
   if (!isBoundedString(exec?.callId, 256)
     || !isBoundedString(exec?.rootCallId, 256)
@@ -234,6 +252,8 @@ export class DshEnforcementAdapter {
   async preExecute(exec) {
     const actor = identityOf(exec)
     if (!actor) return denial('INVALID_DSH_EXECUTION_IDENTITY')
+    let scope
+    try { scope = executionScopeOf(exec) } catch { return denial('DSH_EXECUTION_SCOPE_INVALID') }
     try {
       if (!this.#snapshots.has(exec)) {
         Object.defineProperty(exec, 'arguments', { value: immutableArguments(exec.arguments), writable: false, configurable: false })
@@ -270,6 +290,18 @@ export class DshEnforcementAdapter {
     if (!authority?.grant || !authority?.identity?.privateKey) {
       this.#auditDenied(preliminaryFacts, 'NO_DSH_AGENT_AUTHORITY')
       return denial('NO_DSH_AGENT_AUTHORITY')
+    }
+    const grantTaskId = isBoundedString(authority.grant.payload?.taskId, 256)
+      ? authority.grant.payload.taskId : null
+    if (scope.taskId !== null && grantTaskId !== null && scope.taskId !== grantTaskId) {
+      this.#auditDenied({ ...preliminaryFacts, taskId: scope.taskId, nodeId: scope.nodeId }, 'DSH_EXECUTION_SCOPE_MISMATCH')
+      return denial('DSH_EXECUTION_SCOPE_MISMATCH')
+    }
+    scope = {
+      taskId: scope.taskId ?? grantTaskId,
+      nodeId: scope.nodeId,
+      assignmentId: scope.assignmentId,
+      canonicalAssignmentId: scope.canonicalAssignmentId,
     }
 
     let parentCallId = null
@@ -324,6 +356,10 @@ export class DshEnforcementAdapter {
       dshRootCallId: call.rootCallId,
       dshParentCallId: call.parentCallId,
       dshToolName: call.toolName,
+      ...(scope.taskId ? { taskId: scope.taskId } : {}),
+      ...(scope.nodeId ? { nodeId: scope.nodeId } : {}),
+      ...(scope.assignmentId ? { assignmentId: scope.assignmentId } : {}),
+      ...(scope.canonicalAssignmentId ? { canonicalAssignmentId: scope.canonicalAssignmentId } : {}),
       ...actionWindow(authority.grant, this.now()),
     }, authority.identity)
     const gatewayDecision = this.gateway.submit({ grant: authority.grant, action })
@@ -339,6 +375,10 @@ export class DshEnforcementAdapter {
       resource,
       requestHash,
       actionId: gatewayDecision.actionId,
+      ...(scope.taskId ? { taskId: scope.taskId } : {}),
+      ...(scope.nodeId ? { nodeId: scope.nodeId } : {}),
+      ...(scope.assignmentId ? { assignmentId: scope.assignmentId } : {}),
+      ...(scope.canonicalAssignmentId ? { canonicalAssignmentId: scope.canonicalAssignmentId } : {}),
     }
 
     if (gatewayDecision.status === 'allowed') {
@@ -381,6 +421,10 @@ export class DshEnforcementAdapter {
         ...facts,
         challengeHash: gatewayDecision.challengeHash,
         ...(review ? { review } : {}),
+        ...(scope.taskId ? { taskId: scope.taskId } : {}),
+        ...(scope.nodeId ? { nodeId: scope.nodeId } : {}),
+        ...(scope.assignmentId ? { assignmentId: scope.assignmentId } : {}),
+        ...(scope.canonicalAssignmentId ? { canonicalAssignmentId: scope.canonicalAssignmentId } : {}),
         signal: exec.signal,
         assertActive: exec.assertActive,
       })

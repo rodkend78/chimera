@@ -158,6 +158,42 @@ test('per-agent explicit routers do not mutate the global Chimera Auto selection
   assert.equal(registry.state().selected.providerId, 'chimera-auto')
 })
 
+test('a task captured in Auto keeps the fabric route after a later manual selection', async () => {
+  const runs = []
+  const registry = await LocalModelFabricRegistry.open({
+    config: {
+      schema: 'chimera.model-routing.v1',
+      region: 'us-west-2',
+      codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high' },
+      bedrockRoutes: [],
+    },
+    audit: new MemoryAuditLog(),
+    workingDirectory: '/workspace/chimera',
+    codexStatus: { configured: true, authentication: 'chatgpt-subscription' },
+    codexClient: {
+      startThread() {
+        return { async run(prompt) {
+          runs.push(prompt)
+          return { finalResponse: '{"summary":"Auto fabric route."}', items: [], usage: null }
+        } }
+      },
+    },
+    bedrockModels: [],
+    bedrockProfiles: [],
+  })
+
+  const capturedSelection = structuredClone(registry.state().selected)
+  await registry.select({ providerId: 'codex', model: 'gpt-5.6-sol' })
+  const taskRouter = await registry.routerFor({ mode: 'auto' }, {
+    agentId: 'ceo',
+    taskId: 'task-captured-auto',
+    capturedSelection,
+  })
+  const result = await taskRouter.route('Plan this task.', { stage: 'decompose', taskId: 'task-captured-auto' })
+  assert.equal(result.summary, 'Auto fabric route.')
+  assert.equal(runs.length, 1)
+})
+
 test('local model fabric verifies and pins an authenticated OpenAI-compatible cloud model', async () => {
   const requests = []
   const registry = await LocalModelFabricRegistry.open({
@@ -214,6 +250,10 @@ test('local model fabric verifies and pins an authenticated OpenAI-compatible cl
     providerId: 'lambda-qwen',
     model: 'Qwen/Qwen3.8-27B-FP8',
   })
+  assert.deepEqual(pinned.resourceClaim({
+    requirements: { capabilities: ['research'] },
+    context: { stage: 'specialist', taskId: 'iris-qwen-1' },
+  }), [{ key: 'model:lambda-qwen:Qwen/Qwen3.8-27B-FP8', access: 'read', verified: true }])
   assert.equal((await pinned.route('Handle this.', { stage: 'specialist', taskId: 'iris-qwen-1' })).summary,
     'Iris completed it on Qwen.')
   assert.equal(requests[0].url, 'http://127.0.0.1:18000/v1/chat/completions')
@@ -276,10 +316,11 @@ test('local model fabric verifies and manually selects a catalog-listed Bedrock 
   await registry.select({ providerId: 'aws-bedrock', model: 'us.anthropic.claude-opus-4-6-v1' })
   assert.equal(registry.state().selected.modelName, 'US Claude Opus 4.6')
   assert.equal(registry.state().mode, 'manual')
-  assert.equal(registry.state().providers[1].models[0].availability, 'verified-manual')
+  assert.equal(registry.state().providers[1].models[0].availability, 'catalog-only')
   assert.equal((await registry.router().route('Do it.', { stage: 'specialist' })).summary, 'Opus completed it.')
-  assert.deepEqual(controlRequests, [{ modelId: 'anthropic.claude-opus-4-6-v1' }])
-  assert.equal(runtimeRequests[0].inferenceConfig.maxTokens, 4)
+  assert.deepEqual(controlRequests, [])
+  assert.equal(runtimeRequests.length, 1)
+  assert.equal(runtimeRequests[0].inferenceConfig.maxTokens, 2000)
 })
 
 test('local model fabric exposes installed media adapters and keeps them out of text model selection', async () => {
@@ -378,6 +419,49 @@ test('local model fabric exposes installed media adapters and keeps them out of 
   assert.equal(runtimeRequests[1].modelId, 'luma.ray-v2:0')
 })
 
+test('Ask fabric selection requires an audited inference-only leaf without probing provider access', async () => {
+  let calls = 0
+  const registry = await LocalModelFabricRegistry.open({
+    config: {
+      schema: 'chimera.model-routing.v1',
+      region: 'us-west-2',
+      codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high' },
+      bedrockRoutes: [],
+      openAiCompatibleProviders: [{
+        id: 'ask-fixture',
+        name: 'Ask Fixture',
+        baseUrl: 'http://127.0.0.1:18001/v1',
+        apiKeyEnv: 'ASK_FIXTURE_KEY',
+        models: [{ id: 'fixture-model', name: 'Fixture Model', capabilities: ['conversation'] }],
+      }],
+    },
+    audit: new MemoryAuditLog(),
+    workingDirectory: '/workspace/chimera',
+    codexStatus: { configured: false, authentication: null },
+    bedrockModels: [],
+    bedrockProfiles: [],
+    env: { ASK_FIXTURE_KEY: 'fixture-secret' },
+    openAiCompatibleFetch: async () => {
+      calls += 1
+      return { ok: true, async text() { return JSON.stringify({ choices: [{ message: { content: '{"answer":"fixture"}' } }] }) } }
+    },
+  })
+
+  const router = await registry.routerForAsk({ mode: 'preferred', providerId: 'ask-fixture', model: 'fixture-model' })
+  assert.equal(router.descriptor.execution, 'inference-only')
+  assert.equal(router.descriptor.providerId, 'ask-fixture')
+  assert.equal(calls, 0)
+  assert.deepEqual(registry.describeAskSelection({ mode: 'auto' }), {
+    schema: 'chimera.model-ask-selection.v1', mode: 'auto', providerId: 'ask-fixture', model: 'fixture-model',
+    eligible: true, availability: 'available', execution: 'inference-only',
+  })
+  assert.deepEqual(registry.describeAskSelection({ mode: 'preferred', providerId: 'missing', model: 'missing' }), {
+    schema: 'chimera.model-ask-selection.v1', mode: 'preferred', requestedProviderId: 'missing', requestedModel: 'missing',
+    providerId: 'ask-fixture', model: 'fixture-model', eligible: true, availability: 'available', execution: 'inference-only', fallback: true,
+  })
+  await assert.rejects(registry.routerForAsk({ mode: 'pinned', providerId: 'codex', model: 'gpt-5.6-sol' }), /ASK_EXECUTOR_NOT_PURE/)
+})
+
 test('local model fabric keeps Mantle distinct and selects Grok and Gemma by exact project model id', async () => {
   const requests = []
   const registry = await LocalModelFabricRegistry.open({
@@ -410,9 +494,7 @@ test('local model fabric keeps Mantle distinct and selects Grok and Gemma by exa
       return {
         ok: true,
         status: 200,
-        async json() {
-          return { choices: [{ message: { content: requests.length === 2 ? 'OK.' : '{"summary":"Grok completed it."}' } }] }
-        },
+        async json() { return { choices: [{ message: { content: '{"summary":"Grok completed it."}' } }] } },
       }
     },
   })
@@ -466,6 +548,49 @@ test('startup discovers Mantle routes without paid probes or claiming inference 
   assert.equal(JSON.parse(requests[1].body).model, 'xai.grok-4.6')
 })
 
+test('Mantle keeps unknown metadata unknown and refuses generation models on the text adapter', async () => {
+  const requests = []
+  const registry = await LocalModelFabricRegistry.open({
+    config: {
+      schema: 'chimera.model-routing.v1', region: 'us-west-2',
+      codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high' }, bedrockRoutes: [],
+      mantle: {
+        priorityModels: [{
+          id: 'fixture.video', name: 'Fixture Video', provider: 'Fixture',
+          inputModalities: ['TEXT'], outputModalities: ['VIDEO'], capabilities: ['video-generation'],
+        }],
+        routes: [
+          { id: 'video-route', model: 'fixture.video', capabilities: ['video-generation'], costClass: 'media' },
+          { id: 'unknown-route', model: 'fixture.unknown', capabilities: ['research'], costClass: 'low' },
+        ],
+      },
+    },
+    audit: new MemoryAuditLog(), workingDirectory: '/workspace/chimera',
+    codexStatus: { configured: false }, bedrockModels: [], bedrockProfiles: [],
+    mantleApiKey: 'test-only',
+    mantleFetch: async (url, init) => {
+      requests.push({ url, method: init.method, body: init.body })
+      if (url.endsWith('/models')) return {
+        ok: true, status: 200, async json() { return { data: [{ id: 'fixture.video' }, { id: 'fixture.unknown' }] } },
+      }
+      throw new Error('TEXT_ADAPTER_MUST_NOT_RUN')
+    },
+  })
+
+  const mantle = registry.state().providers.find((provider) => provider.id === 'aws-bedrock-mantle')
+  const unknown = mantle.models.find((model) => model.id === 'fixture.unknown')
+  assert.deepEqual(unknown.capabilities, [])
+  assert.deepEqual(unknown.inputModalities, [])
+  assert.deepEqual(unknown.outputModalities, [])
+  assert.equal(unknown.metadataStatus, 'unknown')
+  assert.deepEqual(registry.state().routing, [])
+  await assert.rejects(
+    registry.routerFor({ mode: 'pinned', providerId: 'aws-bedrock-mantle', model: 'fixture.video' }),
+    { code: 'MODEL_REQUIRES_SPECIALIST_ADAPTER' },
+  )
+  assert.deepEqual(requests.map((request) => request.method), ['GET'])
+})
+
 test('local model fabric advertises priority Mantle routes but never marks them connected without a key', async () => {
   const registry = await LocalModelFabricRegistry.open({
     config: {
@@ -487,4 +612,74 @@ test('local model fabric advertises priority Mantle routes but never marks them 
   assert.equal(mantle.connectionStatus, 'authentication-required')
   assert.deepEqual(mantle.models.map((model) => model.id), ['google.gemma-4-31b', 'xai.grok-4.6'])
   assert.ok(mantle.models.every((model) => model.availability === 'access-required'))
+})
+
+test('selection description and explicit router construction never run a model probe', async () => {
+  const requests = []
+  const registry = await LocalModelFabricRegistry.open({
+    config: {
+      schema: 'chimera.model-routing.v1',
+      region: 'us-west-2',
+      codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high' },
+      bedrockRoutes: [],
+      openAiCompatibleProviders: [{
+        id: 'fixture-cloud',
+        name: 'Fixture Cloud',
+        baseUrl: 'http://127.0.0.1:18000/v1',
+        apiKeyEnv: 'FIXTURE_API_KEY',
+        models: [{ id: 'fixture-model', name: 'Fixture Model', capabilities: ['conversation'] }],
+      }],
+    },
+    audit: new MemoryAuditLog(),
+    workingDirectory: '/workspace/chimera',
+    codexStatus: { configured: false },
+    bedrockModels: [],
+    bedrockProfiles: [],
+    env: { FIXTURE_API_KEY: 'fixture-secret' },
+    openAiCompatibleFetch: async () => {
+      requests.push('paid-probe')
+      return { ok: true, status: 200, async text() { return '{"choices":[{"message":{"content":"{}"}}]}' } }
+    },
+  })
+
+  const described = await registry.describeSelection({ mode: 'pinned', providerId: 'fixture-cloud', model: 'fixture-model' })
+  assert.equal(described.providerId, 'fixture-cloud')
+  assert.equal(described.model, 'fixture-model')
+  assert.equal(described.inferenceCalled, false)
+  assert.equal(described.verification, 'not-run')
+  assert.equal(described.availability, 'catalog-only')
+  await registry.select({ providerId: 'fixture-cloud', model: 'fixture-model' })
+  await registry.routerFor({ mode: 'pinned', providerId: 'fixture-cloud', model: 'fixture-model' })
+  assert.deepEqual(requests, [])
+})
+
+test('captured provider routers recheck the connection fence before model dispatch', async () => {
+  let enabled = true
+  const requests = []
+  const registry = await LocalModelFabricRegistry.open({
+    config: {
+      schema: 'chimera.model-routing.v1',
+      region: 'us-west-2',
+      codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high' },
+      bedrockRoutes: [],
+      openAiCompatibleProviders: [{
+        id: 'fixture-cloud', name: 'Fixture Cloud', baseUrl: 'http://127.0.0.1:18000/v1', apiKeyEnv: 'FIXTURE_API_KEY',
+        models: [{ id: 'fixture-model', name: 'Fixture Model', capabilities: ['conversation'] }],
+      }],
+    },
+    audit: new MemoryAuditLog(), workingDirectory: '/workspace/chimera', codexStatus: { configured: false },
+    bedrockModels: [], bedrockProfiles: [], env: { FIXTURE_API_KEY: 'fixture-secret' },
+    routeGuard: ({ providerId }) => {
+      if (!enabled) throw Object.assign(new Error('CONNECTION_DISABLED'), { code: 'CONNECTION_DISABLED' })
+      assert.equal(providerId, 'fixture-cloud')
+    },
+    openAiCompatibleFetch: async () => {
+      requests.push('provider-call')
+      return { ok: true, status: 200, async text() { return '{"summary":"fixture"}' } }
+    },
+  })
+  const router = await registry.routerFor({ mode: 'pinned', providerId: 'fixture-cloud', model: 'fixture-model' })
+  enabled = false
+  await assert.rejects(() => router.route('Do it.', { stage: 'specialist' }), { code: 'CONNECTION_DISABLED' })
+  assert.deepEqual(requests, [])
 })

@@ -69,6 +69,35 @@ test('real runtime and durable ledger deduplicate intake task across concurrent 
   assert.equal(runtime.tasks.list().length, 1)
   await assert.rejects(runtime.submitIntakeTask({ ...input, objective: 'Different task' }), { code: 'CLIENT_INTAKE_CONFLICT' })
 })
+
+test('exact intake replay returns its durable receipt while unrelated work is active', async t => {
+  const directory = await mkdtemp(join(realpathSync(tmpdir()), 'chimera-intake-replay-active-'))
+  const options = {
+    profileDir: join(directory, 'browser/ceo'),
+    decisionFile: join(directory, 'decisions.jsonl'),
+    taskFile: join(directory, 'tasks.jsonl'),
+    modelCallFile: join(directory, 'model-calls.jsonl'),
+    agentFile: join(directory, 'agents/registry.json'),
+    modelRegistry: { state: () => ({ selected: null, providers: [] }), router: () => { throw new Error('MODEL_MUST_NOT_RUN') }, async select() {} },
+    browserExecutor: { start: async () => ({ running: true, tabs: [] }), state: async () => ({ running: true, tabs: [] }), suspend: async () => ({ running: false, tabs: [] }), close: async () => {} },
+  }
+  let runtime
+  try {
+    runtime = new ChimeraBrowserRuntime(options)
+    await runtime.start()
+    const taskId = 'intake-' + 'b'.repeat(40)
+    const objective = 'Return the already durable intake task.'
+    const existing = await runtime.tasks.submit({ taskId, objective, model: null, context: { source: 'client-intake' } })
+    await runtime.tasks.submit({ taskId: 'unrelated-active', objective: 'Unrelated active work.', model: null, context: { projectId: 'fixture' }, queue: true })
+    await runtime.tasks.start('unrelated-active')
+    const replay = await runtime.submitIntakeTask({ taskId, objective, budget: { maxTurns: 0 } })
+    assert.equal(replay.taskId, existing.taskId)
+    assert.equal(runtime.tasks.get(taskId).objective, objective)
+  } finally {
+    await runtime?.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
 test('existing Clients note route accepts new clients and preserves validation error codes', async t => {
   const { headers, operatorSessions, service } = await fixture(t)
   assert.equal(typeof api.clientDirectoryAdapter, 'function')

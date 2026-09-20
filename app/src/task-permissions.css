@@ -1,0 +1,13 @@
+.task-permissions { min-width: 0; overflow-wrap: anywhere; }
+.task-permissions > summary:focus-visible { outline: 2px solid var(--accent, #0c8694); outline-offset: 3px; border-radius: 6px; }
+.task-permissions > p { color: var(--text-muted, #53657d); line-height: 1.5; }
+.task-permissions-lease { margin-top: 12px; padding: 12px; border: 1px solid var(--border, #dce4ed); border-radius: 12px; }
+.task-permissions-lease header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+.task-permissions-lease dl { margin: 12px 0 0; display: grid; gap: 8px; }
+.task-permissions-lease dl > div { display: grid; grid-template-columns: minmax(0, 130px) minmax(0, 1fr); gap: 10px; }
+.task-permissions-lease dt { color: var(--text-muted, #53657d); }
+.task-permissions-lease dd { margin: 0; min-width: 0; }
+.task-permissions-warning { padding: 10px; border-left: 3px solid var(--accent, #0c8694); line-height: 1.5; }
+@media (max-width: 520px) {
+  .task-permissions-lease dl > div { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+}

@@ -49,6 +49,13 @@ account state and rebuilds future model routes without restarting the
 workspace. A task already in flight keeps its captured router and is not
 silently moved between providers.
 
+The Conversation **Ask agent** mode uses the selected agent's inference-only
+route. It is intentionally separate from **Start work** and **Continue task**:
+an Ask response does not create a task, invoke a worker tool, or establish
+repository/check/publication evidence. Task modes capture their route and
+requirements at admission, retain the task-bound explanation, and execute only
+through the worker lease and approval boundary.
+
 ### Antigravity through the local signed-in account
 
 The operator-approved native executor is available to RJ and every registered
@@ -57,7 +64,7 @@ and its signed-in account, with no Gemini API-key fallback. Discovery does not
 prove quota or subscription entitlement; a successful call establishes session
 readiness, not an independently verified billing ledger.
 
-Open **Agents → Connections → Antigravity → Find Antigravity models**. Choose
+Open **Settings → Connections → Antigravity → Find Antigravity models**. Choose
 an Antigravity model for RJ or a specialist, then choose **Pinned** to prevent
 fallback. **Preferred** retains normal fallback behavior. Existing agent pins
 are not overwritten, and Auto defaults are unchanged. Rediscover after server
@@ -70,6 +77,12 @@ Chimera does not change those settings or pass an auto-approval flag. Permission
 denials or requests requiring an interactive session may fail the headless task;
 review/configure the CLI or use the desktop app, then explicitly submit new work.
 The UI calls out this distinction at both connection and agent-picker surfaces.
+
+Auto, Preferred, and Pinned are preserved for both RJ and specialists. A
+Preferred route may fall back before dispatch when policy permits; a Pinned
+route never silently falls back. Provider or SDK failures after dispatch are
+unknown outcomes, not proof that nothing happened, so Chimera retains the call
+and blocks automatic retry or fallback until the operator inspects it.
 
 Each call starts a fresh CLI session with the exact selected model, a custom
 Chimera assignment agent, scrubbed credential environment, bounded output and

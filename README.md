@@ -112,6 +112,13 @@ retains only bounded connection state and does not put the token in the browser,
 repository, task record, or audit projection. Do not paste account status,
 authorization URLs, tokens, or callback details into an issue.
 
+For agent setup, use **Team** to review the roster and open **New agent** for a
+native Chimera agent. Use **Settings → Import agents** to discover and preview
+Hermes candidates before importing them. Setup and continuity import do not
+start work; choose **Ask agent**, **Start work**, or **Continue task** explicitly
+from the Conversation surface. Ask is inference-only, while task work remains
+bound to the selected route, task lease, approval, and retained evidence.
+
 AWS Bedrock Runtime and AWS Bedrock Mantle are optional specialist lanes.
 Configure the normal AWS credential chain or an explicitly supported local
 environment variable only on the machine that runs Chimera, and verify the
@@ -296,6 +303,7 @@ The technical contracts live in:
 - [Security model](docs/SECURITY_MODEL.md)
 - [Browser contract](docs/BROWSER_CONTRACT.md)
 - [Model providers](docs/MODEL_PROVIDERS.md)
+- [CEO workspace](docs/CEO_WORKSPACE.md)
 - [Agent harness](docs/AGENT_HARNESS.md)
 - [Agent registry](docs/AGENT_REGISTRY.md)
 - [ADE workspace](docs/ADE_WORKSPACE.md)

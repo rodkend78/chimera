@@ -17,6 +17,8 @@ import {
   generateIdentity,
   signGrant,
 } from '../src/identity.mjs'
+import { sha256 } from '../src/canonical.mjs'
+import { createTrustedModelCallNotSentError } from '../src/ceo/model-call-errors.mjs'
 
 const now = Date.parse('2026-08-27T18:00:00.000Z')
 const window = {
@@ -104,6 +106,76 @@ test('an allowed model call is signed, policy checked, and attributed before pro
     && fact.actionId === authorized.actionId
     && fact.outcome === 'allowed'
   )), true)
+})
+
+test('a trusted provider fence remains failed-not-sent through the gateway and reliable ledger', async () => {
+  const f = fixture({ grantedResource: 'model:fenced-provider' })
+  const fencedProvider = {
+    routerId: 'fenced-provider',
+    async route() {
+      throw createTrustedModelCallNotSentError('connection disabled', {
+        code: 'CONNECTION_DISABLED',
+        reason: 'CONNECTION_DISABLED',
+      })
+    },
+  }
+  const gatewayRouter = createGatewayModelRouter({
+    provider: fencedProvider,
+    gateway: f.gateway,
+    grant: f.grant,
+    identity: f.agent,
+    audit: f.audit,
+    agentId: 'ceo',
+    now: () => now,
+  })
+  await withLedger(f.audit, async ledger => {
+    const reliable = createReliableModelRouter({ provider: gatewayRouter, ledger, audit: f.audit, now: () => now })
+    const prompt = 'This must be fenced before provider dispatch.'
+    const context = { stage: 'specialist', taskId: 'fenced-task' }
+    await assert.rejects(() => reliable.route(prompt, context), error => (
+      error.code === 'CONNECTION_DISABLED' && error.dispatchState === 'not_sent'
+    ))
+    const requestHash = sha256({ prompt, context })
+    const callId = `model-${sha256({ providerRouterId: gatewayRouter.routerId, requestHash, scopeId: gatewayRouter.authorizationScope }).slice(0, 32)}`
+    const record = await ledger.lookup(callId)
+    assert.equal(record.status, 'failed-not-sent')
+    assert.equal(record.failure.dispatchState, 'not_sent')
+  })
+})
+
+test('opaque execution controls cross gateway and reliable wrappers without entering request identity', async () => {
+  const f = fixture()
+  const seen = []
+  const provider = {
+    routerId: 'provider-router',
+    async route(prompt, context, controls) {
+      seen.push({ prompt, context, controls })
+      return { summary: 'controlled result' }
+    },
+  }
+  const gatewayRouter = createGatewayModelRouter({
+    provider,
+    gateway: f.gateway,
+    grant: f.grant,
+    identity: f.agent,
+    audit: f.audit,
+    agentId: 'ceo',
+    now: () => now,
+  })
+  await withLedger(f.audit, async ledger => {
+    const reliable = createReliableModelRouter({ provider: gatewayRouter, ledger, audit: f.audit, now: () => now })
+    const prompt = 'Keep controls out of the signed request.'
+    const context = { stage: 'specialist', taskId: 'controls-task' }
+    const controls = { signal: new AbortController().signal, onProgress() {}, authorityProof: { secret: true } }
+    assert.deepEqual(await reliable.route(prompt, context, controls), { summary: 'controlled result' })
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].controls, controls)
+    assert.deepEqual(seen[0].context, context)
+    const authorized = f.audit.entries().map(entry => entry.fact).find(fact => fact.kind === 'model.call.authorized')
+    assert.equal(authorized.requestHash, sha256({ prompt, context }))
+    assert.equal(Object.hasOwn(authorized, 'controls'), false)
+    assert.equal(Object.hasOwn(authorized, 'authorityProof'), false)
+  })
 })
 
 test('an out-of-grant model call is denied before provider dispatch and is safe to retry', async () => {

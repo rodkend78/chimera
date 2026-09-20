@@ -47,6 +47,13 @@ function matchesSchema(value, schema) {
   if (schema.anyOf) return schema.anyOf.some(candidate => matchesSchema(value, candidate))
   if (schema.enum && !schema.enum.includes(value)) return false
   if (schema.type === 'null') return value === null
+  if (schema.type === 'number') return typeof value === 'number'
+    && Number.isFinite(value)
+    && (schema.minimum === undefined || value >= schema.minimum)
+    && (schema.maximum === undefined || value <= schema.maximum)
+  if (schema.type === 'integer') return Number.isSafeInteger(value)
+    && (schema.minimum === undefined || value >= schema.minimum)
+    && (schema.maximum === undefined || value <= schema.maximum)
   if (schema.type === 'string') return typeof value === 'string'
     && value.length >= (schema.minLength ?? 0) && value.length <= (schema.maxLength ?? Infinity)
   if (schema.type === 'array') return Array.isArray(value)
@@ -54,8 +61,12 @@ function matchesSchema(value, schema) {
     && value.every(item => matchesSchema(item, schema.items))
   if (schema.type === 'object') return value !== null && typeof value === 'object' && !Array.isArray(value)
     && (schema.required ?? []).every(key => Object.hasOwn(value, key))
-    && Object.entries(value).every(([key, item]) => Object.hasOwn(schema.properties ?? {}, key)
-      ? matchesSchema(item, schema.properties[key]) : schema.additionalProperties !== false)
+    && Object.entries(value).every(([key, item]) => {
+      if (Object.hasOwn(schema.properties ?? {}, key)) return matchesSchema(item, schema.properties[key])
+      const pattern = Object.entries(schema.patternProperties ?? {}).find(([expression]) => new RegExp(expression).test(key))
+      if (pattern) return matchesSchema(item, pattern[1])
+      return schema.additionalProperties !== false
+    })
   return false
 }
 const AGENT = `---

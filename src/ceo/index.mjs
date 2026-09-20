@@ -9,5 +9,19 @@ export {
   ModelCallOutcomeUnknownError,
 } from './reliable-model-router.mjs'
 export { SignedSpecialistStub } from './specialist-stub.mjs'
-export { DurableTaskLedger, TASK_LEDGER_SCHEMA } from './task-ledger.mjs'
+export {
+  createTaskEvidenceReceiptIssuer,
+  DurableTaskLedger,
+  TASK_EVIDENCE_KINDS,
+  TASK_EVIDENCE_SOURCES,
+  TASK_LEDGER_SCHEMA,
+} from './task-ledger.mjs'
+export { deriveTaskOutcomes, TASK_OUTCOMES_SCHEMA } from './task-outcomes.mjs'
+export { classifyTaskRecovery, TASK_RECOVERY_ACTIONS, TASK_RECOVERY_SCHEMA } from './task-recovery.mjs'
+export {
+  createTaskFailureFromError,
+  createTrustedModelCallNotSentError,
+  isTrustedModelCallNotSentError,
+  isTrustedTaskFailure,
+} from './model-call-errors.mjs'
 export { CeoWorkspace } from './workspace.mjs'

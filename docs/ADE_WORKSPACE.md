@@ -7,6 +7,12 @@ work in a task-owned copy until the operator explicitly accepts the reviewed res
 
 This public contract intentionally omits private deployment evidence and historical operator run logs.
 
+The **Work** surface is the operator's task view. It retains the signed plan,
+task-bound approvals, conversation/results, routing explanation, explicit
+project review, and recovery state for the selected task. A clean or changed
+fixture workspace is local evidence only; it is not proof of a live provider,
+iMac, AWS account, public publication, or release.
+
 ## Operating flow
 
 1. Open **Projects** and register the repository. Local repositories must be
@@ -29,6 +35,23 @@ This public contract intentionally omits private deployment evidence and histori
    still at the prepared commit, recomputes the review digest, applies the
    exact patch, and records the source and isolated commit IDs in the audit
    chain. A changed worktree or stale review is rejected.
+
+## Outcome stages and safe continuation
+
+The selected task reports four independent evidence stages: **Work produced**,
+**Checks passed**, **Ready for review**, and **Published**. Each stage is
+receipt-backed. Artifact materialization is bound to the task, worker session,
+artifact ID, and content hash; checks, review readiness, and publication are
+current-revision scoped. “Not published” is the honest state until both the
+publishing adapter and current-path verifier provide matching proof; task
+summaries, commits, local files, and model prose cannot promote it.
+
+If Chimera restarts while an approval or worker is active, the prior approval
+and in-flight assignment are settled/orphaned without automatic replay. Retained
+task state and drafts are marked for inspection, and a later **Continue task**
+request receives a new task identity and fresh approval. Provider/tool outcomes
+that may have dispatched remain unknown and expose inspection/reconciliation
+only; no retry or fallback is offered automatically.
 
 ## Workspace refresh continuity
 

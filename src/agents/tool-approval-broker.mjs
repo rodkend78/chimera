@@ -2,6 +2,20 @@ function bounded(value, maximum = 2048) {
   return typeof value === 'string' && value.length > 0 && value.length <= maximum
 }
 
+function trustedScope(request) {
+  const taskId = request?.taskId ?? null
+  const nodeId = request?.nodeId ?? null
+  const assignmentId = request?.assignmentId ?? null
+  const canonicalAssignmentId = request?.canonicalAssignmentId ?? null
+  if ((taskId !== null && !bounded(taskId, 256))
+    || (nodeId !== null && !bounded(nodeId, 128))
+    || (assignmentId !== null && !bounded(assignmentId, 256))
+    || (canonicalAssignmentId !== null && !bounded(canonicalAssignmentId, 256))
+    || (nodeId !== null && taskId === null)) throw new TypeError('WORKER_APPROVAL_SCOPE_INVALID')
+  if (canonicalAssignmentId !== null && taskId === null) throw new TypeError('WORKER_APPROVAL_SCOPE_INVALID')
+  return { taskId, nodeId, assignmentId, canonicalAssignmentId }
+}
+
 function displayAgent(agentId) {
   return agentId.split('-').map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`).join(' ')
 }
@@ -37,13 +51,14 @@ function semanticReview(value) {
 export class WorkerToolApprovalBroker {
   #pending = new Map()
 
-  constructor({ queue, audit, onPending = () => {}, now = () => Date.now() }) {
-    if (!queue?.post || !audit?.append || typeof onPending !== 'function') {
+  constructor({ queue, audit, onPending = () => {}, onResolved = () => {}, now = () => Date.now() }) {
+    if (!queue?.post || !audit?.append || typeof onPending !== 'function' || typeof onResolved !== 'function') {
       throw new TypeError('WORKER_APPROVAL_BROKER_CONFIG_INVALID')
     }
     this.queue = queue
     this.audit = audit
     this.onPending = onPending
+    this.onResolved = onResolved
     this.now = now
   }
 
@@ -60,20 +75,37 @@ export class WorkerToolApprovalBroker {
       || this.#pending.has(request.actionId)) {
       throw new TypeError('WORKER_APPROVAL_REQUEST_INVALID')
     }
+    const scope = trustedScope(request)
     const review = semanticReview(request.review)
     let settle
     const waiting = new Promise((resolve) => { settle = resolve })
     let complete
     const completion = new Promise((resolve) => { complete = resolve })
     const abort = () => {
-      if (!this.#pending.has(request.actionId)) return
+      const pending = this.#pending.get(request.actionId)
+      if (!pending) return
       this.#pending.delete(request.actionId)
       settle(null)
-      complete({ status: 'denied', actionId: request.actionId, reason: 'APPROVAL_CANCELLED' })
+      const result = { status: 'denied', actionId: request.actionId, reason: 'APPROVAL_CANCELLED' }
+      complete(result)
+      // AbortSignal dispatch is synchronous and cannot await the durable step
+      // transition. Keep the transition observable and audit any persistence
+      // failure rather than leaving an unhandled rejection behind.
+      Promise.resolve(this.onResolved(request.actionId, structuredClone(pending.scope), result)).catch((error) => {
+        try {
+          this.audit.append({
+            kind: 'worker.approval.lifecycle-failed',
+            actionId: request.actionId,
+            code: typeof error?.code === 'string' ? error.code : 'WORKER_APPROVAL_LIFECYCLE_FAILED',
+            at: new Date(this.now()).toISOString(),
+          })
+        } catch { /* The approval outcome is already fenced. */ }
+      })
     }
     request.signal?.addEventListener?.('abort', abort, { once: true })
     this.#pending.set(request.actionId, {
       challengeHash: request.challengeHash,
+      scope,
       settle: (decision) => {
         request.signal?.removeEventListener?.('abort', abort)
         settle(decision)
@@ -94,6 +126,10 @@ export class WorkerToolApprovalBroker {
         },
         resource: request.resource,
         expiresAt: new Date(this.now() + 5 * 60_000).toISOString(),
+        ...(scope.taskId ? { taskId: scope.taskId } : {}),
+        ...(scope.nodeId ? { nodeId: scope.nodeId } : {}),
+        ...(scope.assignmentId ? { assignmentId: scope.assignmentId } : {}),
+        ...(scope.canonicalAssignmentId ? { canonicalAssignmentId: scope.canonicalAssignmentId } : {}),
         agent: { agentId: request.agentId, grantId: request.grantId },
         policyRationale: {
           ruleId: 'dsh-confirm-tool',
@@ -104,7 +140,7 @@ export class WorkerToolApprovalBroker {
         detail: review?.summary
           ?? `Review the ${request.capability} request for ${request.resource}. Arguments stay hashed in the decision record.`,
       })
-      this.onPending(request.actionId)
+      await this.onPending(request.actionId, structuredClone(scope))
       // Storage may yield while the operator changes the proposal's recipient
       // snapshot. Recheck trusted runtime authority before waiting for a human.
       if (typeof request.assertActive === 'function') {
@@ -141,6 +177,7 @@ export class WorkerToolApprovalBroker {
     if (!pending) return { status: 'denied', actionId, reason: 'NO_PENDING_ACTION' }
     this.#pending.delete(actionId)
     pending.complete(structuredClone(gatewayResult))
+    await this.onResolved(actionId, structuredClone(pending.scope), structuredClone(gatewayResult))
     return structuredClone(gatewayResult)
   }
 
@@ -151,6 +188,7 @@ export class WorkerToolApprovalBroker {
     this.#pending.delete(actionId)
     pending.settle(null)
     pending.complete(result)
+    await this.onResolved(actionId, structuredClone(pending.scope), result)
     return result
   }
 
@@ -163,6 +201,7 @@ export class WorkerToolApprovalBroker {
       this.#pending.delete(actionId)
       pending.settle(null)
       pending.complete({ status: 'denied', actionId, reason })
+      await this.onResolved(actionId, structuredClone(pending.scope), { status: 'denied', actionId, reason })
     }
     return actionIds
   }

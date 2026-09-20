@@ -18,6 +18,7 @@ async function fixture(t, { long = false, handle, extra = false, reviewFields = 
   const decision = { actionId: 'fixture-action', title: 'Review fixture action', detail: 'No real action will execute in this test.',
     agent: { agentId: 'ace' }, actionDiff: { review: { fields } } }
   const state = { agent: { id: 'ceo', name: 'RJ', status: 'Idle' }, controller: { type: 'agent', id: 'ceo' }, suspended: false,
+    draftScope: { schema: 'chimera.draft-scope.v1', workspaceId: 'decision-fixture', operatorId: 'operator-fixture' },
     browser: { running: true, tabs: [] }, activity: [], recentEvents: [], decisions: [decision], audit: { valid: true },
     models: { selected: { providerId: 'fixture', model: 'fixture', providerName: 'Fixture', modelName: 'Fixture' }, providers: [] },
     auth: { codex: { connected: true } }, agents: { specialists: [] }, tasks: [], conversations: { channels: [], messages: [] } }
@@ -72,7 +73,7 @@ test('decision review opens with non-action focus and contains keyboard navigati
     await page.keyboard.press(key)
     assert.equal(await dialog.evaluate(node => node.contains(document.activeElement)), true, `focus escaped on ${key} to ${await page.evaluate(() => document.activeElement?.tagName)}`)
   }
-  await page.locator('[aria-label="RJ queue objective"]').evaluate(node => node.focus())
+  await page.locator('[aria-label="Ask agent"]').evaluate(node => node.focus())
   assert.equal(await dialog.evaluate(node => node.contains(document.activeElement)), true, 'background controls must be inert during review')
   assert.deepEqual(writes, [])
   assert.deepEqual(errors, [])

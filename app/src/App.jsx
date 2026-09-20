@@ -13,9 +13,15 @@ import { BrowserFiles } from './BrowserFiles.jsx'
 import { AccountBrowser } from './AccountBrowser.jsx'
 import { TaskControls, TaskControlSession } from './TaskControls.jsx'
 import { TaskRoomControls } from './TaskRoomControls.jsx'
+import { TaskWorkspace } from './TaskWorkspace.jsx'
 import { useTranscriptReading } from './useTranscriptReading.js'
 import { DecisionResponsesContext, DecisionResponse, DecisionResponseList, useDecisionResponses } from './DecisionResponses.jsx'
 import { OperatorRecovery } from './OperatorRecovery.jsx'
+import { AgentSetupWizard } from './AgentSetupWizard.jsx'
+import { ConnectionsWorkspace } from './ConnectionsWorkspace.jsx'
+import { ConversationComposer } from './ConversationComposer.jsx'
+import './agent-setup.css'
+import './conversation-composer.css'
 import {
   Activity,
   ArrowLeft,
@@ -261,12 +267,13 @@ function ModelCapabilityIcon({ capabilities }) {
 
 function modelStatus(model) {
   if (model.adapter === 'ready') return ['Adapter ready', 'ready']
-  if (['verified-route', 'verified-manual', 'authenticated'].includes(model.availability)) return ['Ready', 'ready']
+  if (['verified-route', 'verified-manual', 'authenticated', 'available'].includes(model.availability)) return ['Configured route', 'ready']
   if (model.availability === 'access-eligible') return ['Access eligible', 'eligible']
   if (model.availability === 'access-required') {
     return [model.endpoint === 'bedrock-mantle' ? 'Mantle connection required' : 'AWS access required', 'warning']
   }
   if (model.availability === 'unavailable') return ['Unavailable', 'danger']
+  if (model.availability === 'catalog-only') return ['Catalog only · not verified', 'muted']
   return ['Check access', 'muted']
 }
 
@@ -334,7 +341,7 @@ function ModelCatalog({ state, onModelSelect, onModelCheck, onOpenMedia }) {
                     type="button"
                     disabled={active || checking}
                     onClick={() => run(model, onModelSelect)}
-                  >{checking ? 'Checking…' : active ? 'In use' : ready ? 'Use model' : 'Check & use'}</button>
+                  >{checking ? 'Selecting…' : active ? 'In use' : ready ? 'Use model' : 'Select model'}</button>
                 ) : model.availability === 'access-eligible' ? (
                   <button type="button" disabled>Adapter required</button>
                 ) : (
@@ -361,9 +368,23 @@ function hermesIntakeErrorMessage(cause) {
   return code.replaceAll('_', ' ').toLowerCase()
 }
 
+function normalizeHermesPreview(preview) {
+  if (!preview || !Array.isArray(preview.candidates)) return preview
+  return {
+    ...preview,
+    candidates: preview.candidates.map(candidate => ({
+      ...candidate,
+      dependencies: candidate.dependencyStatus !== undefined
+        ? [candidate.dependencyStatus]
+        : candidate.dependencies,
+    })),
+  }
+}
+
 function AgentImportPanel({ state, onDiscoverAgents, onImportAgents, onImportMainAgent }) {
   const [preview, setPreview] = useState(null)
   const [selected, setSelected] = useState([])
+  const [overrides, setOverrides] = useState({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const discover = async () => {
@@ -371,7 +392,8 @@ function AgentImportPanel({ state, onDiscoverAgents, onImportAgents, onImportMai
     setError('')
     try {
       const result = await onDiscoverAgents()
-      setPreview(result)
+      setPreview(normalizeHermesPreview(result))
+      setOverrides({})
       setSelected(result.candidates.filter((candidate) => !candidate.imported && !candidate.reservedForMain).map((candidate) => candidate.candidateId))
     } catch (cause) {
       setError(hermesIntakeErrorMessage(cause))
@@ -389,10 +411,16 @@ function AgentImportPanel({ state, onDiscoverAgents, onImportAgents, onImportMai
     setBusy(true)
     setError('')
     try {
-      await onImportAgents({
+      const result = await onImportAgents({
         discoveryId: preview.discoveryId,
-        agents: selected.map((candidateId) => ({ candidateId })),
+        agents: selected.map((candidateId) => ({
+          candidateId,
+          ...(overrides[candidateId]?.displayName?.trim() ? { displayName: overrides[candidateId].displayName.trim() } : {}),
+          ...(overrides[candidateId]?.role?.trim() ? { role: overrides[candidateId].role.trim() } : {}),
+          ...(overrides[candidateId]?.capabilities?.trim() ? { capabilities: overrides[candidateId].capabilities.split(',').map(value => value.trim()).filter(Boolean) } : {}),
+        })),
       })
+      if ((result?.continuity ?? []).some(item => item?.status !== 'materialized')) setError('Import accepted, but continuity is incomplete. Open agent setup to repair it before Ask or testing.')
       setPreview(null)
       setSelected([])
     } catch (cause) {
@@ -415,6 +443,7 @@ function AgentImportPanel({ state, onDiscoverAgents, onImportAgents, onImportMai
       setBusy(false)
     }
   }
+  const previewExpired = Boolean(preview && Date.parse(preview.expiresAt ?? '') <= Date.now())
   return (
     <section className="surface-card agent-import-panel" aria-labelledby="agent-import-heading">
       <div className="agent-import-heading">
@@ -424,22 +453,23 @@ function AgentImportPanel({ state, onDiscoverAgents, onImportAgents, onImportMai
       {error ? <p className="agent-import-error" role="alert">{error}</p> : null}
       {preview ? (
         <div className="agent-preview">
-          <div className="agent-preview-meta"><span>{preview.source.host}</span><strong>{preview.candidates.length} profiles found</strong><small>Read-only preview · expires {new Date(preview.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small></div>
+          <div className="agent-preview-meta"><span>{preview.source?.host ?? 'Hermes source unavailable'}</span><strong>{preview.candidates.length} profiles found</strong><small className={previewExpired ? 'warning' : ''}>{previewExpired ? 'Preview expired; run discovery again.' : `Read-only preview · expires ${new Date(preview.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`}</small></div>
           <div className="agent-candidate-grid">
             {preview.candidates.map((candidate) => (
               <label className={`agent-candidate ${candidate.imported || candidate.reservedForMain ? 'imported' : ''}`} key={candidate.candidateId}>
-                <input type="checkbox" checked={candidate.imported || selected.includes(candidate.candidateId)} disabled={candidate.imported || candidate.reservedForMain || busy} onChange={() => toggle(candidate.candidateId)} />
+                <input type="checkbox" checked={candidate.imported || selected.includes(candidate.candidateId)} disabled={candidate.imported || candidate.reservedForMain || busy || previewExpired} onChange={() => toggle(candidate.candidateId)} />
                 <AgentAvatar className="candidate-avatar" agentId={candidate.profileId} name={candidate.displayName} />
-                <span><strong>{candidate.displayName}</strong><small>{candidate.reservedForMain ? 'Reserved for the main RJ persona' : candidate.imported ? 'Already registered' : candidate.defaultRole}</small></span>
+                <span><strong>{candidate.displayName}</strong><small>{candidate.reservedForMain ? 'Reserved for the main RJ persona' : candidate.imported ? 'Already registered' : candidate.defaultRole}</small><small>{candidate.exclusions?.length ? `Excluded: ${candidate.exclusions.join(', ')}` : ''}{candidate.dependencies?.length ? ` Dependencies: ${candidate.dependencies.join(', ')}` : ''}</small></span>
+                {!candidate.imported && !candidate.reservedForMain ? <span className="agent-candidate-overrides"><input aria-label={`Display name for ${candidate.displayName}`} value={overrides[candidate.candidateId]?.displayName ?? candidate.displayName} disabled={busy || previewExpired} onChange={event => setOverrides(current => ({ ...current, [candidate.candidateId]: { ...current[candidate.candidateId], displayName: event.target.value } }))} /><input aria-label={`Role for ${candidate.displayName}`} value={overrides[candidate.candidateId]?.role ?? candidate.defaultRole ?? ''} disabled={busy || previewExpired} onChange={event => setOverrides(current => ({ ...current, [candidate.candidateId]: { ...current[candidate.candidateId], role: event.target.value } }))} /><input aria-label={`Capabilities for ${candidate.displayName}`} value={overrides[candidate.candidateId]?.capabilities ?? (candidate.defaultCapabilities ?? []).join(', ')} disabled={busy || previewExpired} onChange={event => setOverrides(current => ({ ...current, [candidate.candidateId]: { ...current[candidate.candidateId], capabilities: event.target.value } }))} /></span> : null}
               </label>
             ))}
           </div>
           <div className="agent-import-actions">
             <button type="button" onClick={() => setPreview(null)} disabled={busy}>Cancel</button>
             {preview.candidates.some((candidate) => candidate.reservedForMain) && state.agents?.main?.continuity?.status === 'not-imported'
-              ? <button type="button" onClick={importMain} disabled={busy}>Import RJ continuity</button>
+              ? <button type="button" onClick={importMain} disabled={busy || previewExpired}>Import RJ continuity</button>
               : null}
-            <button className="primary-action" type="button" onClick={importSelected} disabled={busy || selected.length === 0}>{busy ? 'Importing…' : `Import selected (${selected.length})`}</button>
+            <button className="primary-action" type="button" onClick={importSelected} disabled={busy || previewExpired || selected.length === 0}>{busy ? 'Importing…' : `Import selected (${selected.length})`}</button>
           </div>
         </div>
       ) : (
@@ -454,7 +484,7 @@ function AgentImportPanel({ state, onDiscoverAgents, onImportAgents, onImportMai
 function eligibleConversationModels(state) {
   return (state.models?.providers ?? []).flatMap((provider) => (
     provider.configured ? (provider.models ?? [])
-      .filter((model) => isSelectableConversationModel(provider, model))
+      .filter((model) => isSelectableConversationModel(provider, model, { allowCatalogOnly: true }))
       .map((model) => ({
         providerId: provider.id,
         providerName: provider.name,
@@ -522,7 +552,7 @@ function specialistOwnedByTask(agent) {
 }
 
 function AgentAccessControls({ agent, profiles, busy, onLifecycle, onSelect, showLifecycle = true }) {
-  const imported = agent.source?.type === 'hermes'
+  const imported = agent.executor?.requiresTask === true || agent.executor?.kind === 'task-harness' || agent.executor?.kind === 'runtime-task-harness'
   const owned = specialistOwnedByTask(agent)
   const running = agent.harnessState === 'Running'
   const recover = ['Interrupted', 'Crashed'].includes(agent.harnessState)
@@ -588,7 +618,7 @@ function AgentUpdatesSession({ children }) {
   return <AgentUpdatesContext.Provider value={{ updates, run, dismiss }}>{children}</AgentUpdatesContext.Provider>
 }
 
-function AgentsView({ settingsOnly = false, state, refresh, onNavigate, onModelSelect, onModelCheck, onDiscoverAgents, onImportAgents, onImportMainAgent, onAgentLifecycle, onAgentAccess, onRemoveAgent, onAgentModel, onConnectGitHub }) {
+function AgentsView({ settingsOnly = false, state, refresh, onNavigate, onOpenSetup, onOpenConnections, onReturnToSetup, setupReturnTarget = null, onModelSelect, onModelCheck, onDiscoverAgents, onImportAgents, onImportMainAgent, onAgentLifecycle, onAgentAccess, onRemoveAgent, onAgentModel, onConnectGitHub }) {
   const providers = state.models?.providers ?? []
   const selected = state.models?.selected
   const specialists = state.agents?.specialists ?? []
@@ -622,7 +652,7 @@ function AgentsView({ settingsOnly = false, state, refresh, onNavigate, onModelS
         title={settingsOnly ? 'Settings' : 'Your team'}
         detail={settingsOnly ? 'Connect your accounts, discover models, and import agents. Setup does not start work.' : 'Choose your agent and model. Account setup and imports live in Settings.'}
         headingId="agents-heading"
-        action={<button className="primary-action" type="button" onClick={() => onNavigate(settingsOnly ? 'Agents' : 'Settings')}>{settingsOnly ? 'Choose agent models' : 'Manage connections'}</button>}
+        action={<div className="section-header-actions"><button className="primary-action" type="button" onClick={() => onNavigate(settingsOnly ? 'Agents' : 'Settings')}>{settingsOnly ? 'Choose agent models' : 'Manage connections'}</button><button type="button" onClick={onOpenSetup}>New agent</button></div>}
       />
       {updates.length ? <section className="agent-updates" aria-labelledby="agent-updates-heading">
         <h2 id="agent-updates-heading">Agent updates</h2>
@@ -677,65 +707,23 @@ function AgentsView({ settingsOnly = false, state, refresh, onNavigate, onModelS
             </article>
           ))}
         </div>}
-        {settingsOnly && <details open className="surface-card provider-card">
-          <summary>Accounts and connections</summary>
-          <section aria-labelledby="connections-heading">
-          <div className="card-heading compact"><div><span className="card-kicker">Model fabric</span><h2 id="connections-heading">Connections</h2></div></div>
-          <div className="connection-list">
-            <RjAwsConnection connection={state.connectors?.rjAws} refresh={refresh} />
-            <AntigravityConnection provider={providers.find(provider => provider.id === 'antigravity')} refresh={refresh} />
-            {providers.map((provider) => {
-              if (provider.id === 'antigravity') return null
-              const eligible = (provider.models ?? []).filter((model) => ['authenticated', 'verified-route', 'verified-manual'].includes(model.availability))
-              const mantleAuthRequired = ['api-key-required', 'authentication-required'].includes(provider.connectionStatus)
-              return (
-                <article className="connection-row" key={provider.id}>
-                  <span className={`connection-dot ${provider.configured ? 'ready' : ''}`} />
-                  <div>
-                    <strong>{provider.name}</strong>
-                    <span>{provider.id === 'codex' && state.auth?.codex?.connected
-                      ? `${state.auth.codex.planType ? `${state.auth.codex.planType} ` : ''}subscription connected`
-                      : provider.configured ? `${eligible.length} approved route${eligible.length === 1 ? '' : 's'} ready`
-                        : mantleAuthRequired ? `${provider.models?.length ?? 0} priority models · AWS login or API key needed`
-                          : 'Not connected'}</span>
-                  </div>
-                  <span className={`status-chip ${provider.configured ? 'ready' : 'muted'}`}>{provider.configured ? 'Connected' : mantleAuthRequired ? 'Auth needed' : 'Offline'}</span>
-                  {eligible.length ? (
-                    <ul>{eligible.map((model) => <li key={model.id}>{model.name}</li>)}</ul>
-                  ) : null}
-                </article>
-              )
-            })}
-            {state.connectors?.github ? (
-              <article className="connection-row" key="github">
-                <span className={`connection-dot ${state.connectors.github.connected ? 'ready' : ''}`} />
-                <div>
-                  <strong>GitHub</strong>
-                  <span>{state.connectors.github.connected
-                    ? `${state.connectors.github.login} · OAuth keychain · ${state.connectors.github.repositories.length} approved repository`
-                    : state.connectors.github.status === 'not-configured' ? 'Repository allowlist not configured' : 'OAuth authorization needed'}</span>
-                </div>
-                <span className={`status-chip ${state.connectors.github.connected ? 'ready' : 'muted'}`}>{state.connectors.github.connected ? 'Connected' : 'Offline'}</span>
-                {!state.connectors.github.connected && state.connectors.github.repositories.length ? (
-                  <button
-                    type="button"
-                    disabled={connectingGitHub}
-                    onClick={async () => {
-                      setConnectingGitHub(true)
-                      try {
-                        await onConnectGitHub()
-                      } finally {
-                        setConnectingGitHub(false)
-                      }
-                    }}
-                  >{connectingGitHub ? 'Authorizing…' : 'Connect GitHub'}</button>
-                ) : null}
-                {state.connectors.github.repositories.length ? <ul>{state.connectors.github.repositories.map((repository) => <li key={repository}>{repository}</li>)}</ul> : null}
-              </article>
-            ) : null}
-          </div>
-          </section>
-        </details>}
+        {settingsOnly ? <ConnectionsWorkspace
+          connections={state.connections?.connections ?? []}
+          modelProviders={providers}
+          returnTarget={setupReturnTarget ? { label: 'setup', composerTarget: setupReturnTarget.composerTarget ?? null, draftKey: setupReturnTarget.draftKey ?? null } : { label: 'team' }}
+          onReturn={setupReturnTarget ? onReturnToSetup : () => onNavigate('Agents')}
+          refresh={refresh}
+        >
+          {/* The shared surface preserves the specialized subscription connected and approved route evidence. */}
+          <RjAwsConnection connection={state.connectors?.rjAws} refresh={refresh} />
+          <AntigravityConnection provider={providers.find(provider => provider.id === 'antigravity')} refresh={refresh} />
+          {state.connectors?.github ? <article className="connection-row" key="github">
+            <span className={`connection-dot ${state.connectors.github.connected ? 'ready' : ''}`} />
+            <div><strong>GitHub</strong><span>{state.connectors.github.connected ? `${state.connectors.github.login} · OAuth keychain · ${state.connectors.github.repositories.length} approved ${state.connectors.github.repositories.length === 1 ? 'repository' : 'repositories'}` : state.connectors.github.status === 'not-configured' ? 'Repository allowlist not configured' : 'OAuth authorization needed'}</span>{state.connectors.github.repositories?.length ? <ul aria-label="Approved GitHub repositories">{state.connectors.github.repositories.map(repository => { const name = typeof repository === 'string' ? repository : repository?.fullName ?? repository?.name; return name ? <li key={name}>{name}</li> : null })}</ul> : null}</div>
+            <span className={`status-chip ${state.connectors.github.connected ? 'ready' : 'muted'}`}>{state.connectors.github.connected ? 'Connected' : 'Offline'}</span>
+            {!state.connectors.github.connected && state.connectors.github.repositories.length ? <button type="button" disabled={connectingGitHub} onClick={async () => { setConnectingGitHub(true); try { await onConnectGitHub() } finally { setConnectingGitHub(false) } }}>{connectingGitHub ? 'Authorizing…' : 'Connect GitHub'}</button> : null}
+          </article> : null}
+        </ConnectionsWorkspace> : null}
       </div>
       {settingsOnly && <details><summary>Import agents</summary><AgentImportPanel state={state} onDiscoverAgents={onDiscoverAgents} onImportAgents={onImportAgents} onImportMainAgent={onImportMainAgent} /></details>}
       {settingsOnly && <details><summary>Advanced model catalog</summary><ModelCatalog state={state} onModelSelect={onModelSelect} onModelCheck={onModelCheck} onOpenMedia={() => onNavigate('Media')} /></details>}
@@ -784,7 +772,7 @@ function QueueSession({ children }) {
   return <QueueContext.Provider value={{ olderTasks, olderMessages, selectedId, setSelectedId, historyRequest, loadHistory, readingPositions }}>{children}</QueueContext.Provider>
 }
 
-function QueueView({ state, onConnectCodex, refresh, notify, roomAddress, setRoomAddress }) {
+function QueueView({ state, onConnectCodex, refresh, notify, onNavigate, onOutcomeAction, roomAddress, setRoomAddress }) {
   const { olderTasks, olderMessages, selectedId: savedSelectedId, setSelectedId, historyRequest, loadHistory: readHistory, readingPositions } = useContext(QueueContext)
   const historyBusy = historyRequest?.status === 'pending'
   const tasks = [...(state.tasks ?? []), ...olderTasks.filter((task) => !state.tasks?.some((current) => current.taskId === task.taskId))]
@@ -798,12 +786,36 @@ function QueueView({ state, onConnectCodex, refresh, notify, roomAddress, setRoo
   const [connecting, setConnecting] = useState(false)
   const selected = channels.find((channel) => channel.conversationId === selectedId)
   const reading = useTranscriptReading(selected?.conversationId, readingPositions)
-  const messages = [...new Map([...(olderMessages[selected?.conversationId] ?? []), ...(state.conversations?.messages ?? []).filter((message) => message.conversationId === selected?.conversationId)].map((message) => [message.messageId, message])).values()]
   const roomTask = selected?.kind === 'task-room' ? tasks.find(task => `task:${task.taskId}` === selected.conversationId
     && (selected.taskId === undefined || selected.taskId === task.taskId)) : null
+  const messageBelongsToRoom = message => message?.conversationId === selected?.conversationId
+    && (selected?.kind !== 'task-room' ? true : Boolean(roomTask && message.taskId === roomTask.taskId))
+  const messages = [...new Map([...(olderMessages[selected?.conversationId] ?? []), ...(state.conversations?.messages ?? [])]
+    .filter(messageBelongsToRoom).map((message) => [message.messageId, message])).values()]
   const team = state.teamMessaging?.tasks?.find(task => task.taskId === roomTask?.taskId)
   const messageById = new Map(messages.map(message => [message.messageId, message]))
-  const selectRoom = id => { setSelectedId(id); setRoomAddress(null) }
+  const addressForChannel = channel => {
+    if (channel?.kind === 'task-room' && channel.taskId) {
+      return { taskId: channel.taskId, recipientAgentIds: [], replyTo: null, destinationRevision: tasks.find(task => task.taskId === channel.taskId)?.destinationRevision ?? null }
+    }
+    if (channel?.recipientAgentId) return { agentId: channel.recipientAgentId, conversationId: channel.conversationId }
+    return null
+  }
+  // Queue history owns the initial/restored destination when App has no
+  // explicit room address yet. Once the operator selects a composer target,
+  // keep that target through section navigation and polling instead of
+  // silently rebinding its draft to whichever room refreshed most recently.
+  useEffect(() => {
+    if (!selected || roomAddress) return
+    const address = addressForChannel(selected)
+    if (address) setRoomAddress(address)
+  }, [selected?.conversationId, selected?.kind, selected?.recipientAgentId, selected?.taskId, roomAddress, tasks, setRoomAddress])
+  const selectRoom = id => {
+    setSelectedId(id)
+    const next = channels.find(channel => channel.conversationId === id)
+    setRoomAddress(addressForChannel(next))
+  }
+  const preserveTaskAddress = next => setRoomAddress(current => current?.taskId === next?.taskId ? current : next)
   const loadHistory = (kind) => {
     if (kind === 'messages' && !selected) return
     return readHistory({ kind, conversationId: selected?.conversationId,
@@ -855,7 +867,8 @@ function QueueView({ state, onConnectCodex, refresh, notify, roomAddress, setRoo
           : selected.kind === 'task-room'
             ? 'Task details are missing or inconsistent. Load older tasks or select another room before using task controls.'
             : 'Select a task room or objective to use task controls.'}</p>}
-      {state.recentEvents?.find((event) => event.kind === 'model.route.selected') ? <p className="queue-compose-hint">Last model route: {(() => {
+      {roomTask ? <TaskWorkspace taskId={roomTask.taskId} onNavigate={onNavigate} onDestinationChange={preserveTaskAddress} onOutcomeAction={onOutcomeAction} refresh={refresh} /> : null}
+      {state.recentEvents?.find((event) => event.kind === 'model.route.selected') ? <p className="queue-compose-hint global-model-route" aria-label="Global last model route">Global last model route (not this task&apos;s route): {(() => {
         const route = state.recentEvents.find((event) => event.kind === 'model.route.selected')
         return `${route.routeId} · ${route.capability} · ${route.selectionReason ?? 'configured route'} · cost class: ${route.costClass} (not measured spend)`
       })()}</p> : null}
@@ -902,7 +915,7 @@ function QueueView({ state, onConnectCodex, refresh, notify, roomAddress, setRoo
           <aside className="conversation-channels" aria-label="Work history">
             <div className="channel-group"><span>RJ and specialists</span>
               {channels.filter((channel) => channel.kind !== 'task-room').map((channel) => (
-                <button className={`conversation-channel ${channel.conversationId === selected?.conversationId ? 'active' : ''}`} type="button" aria-pressed={channel.conversationId === selected?.conversationId} key={channel.conversationId} onClick={() => selectRoom(channel.conversationId)}>
+                <button className={`conversation-channel ${channel.conversationId === selected?.conversationId ? 'active' : ''}`} type="button" aria-label={`${channel.label} ${channel.detail}`} aria-pressed={channel.conversationId === selected?.conversationId} key={channel.conversationId} onClick={() => selectRoom(channel.conversationId)}>
                   <AgentAvatar className="channel-avatar" agentId={channel.kind === 'hq' ? 'ceo' : channel.recipientAgentId} name={displayName(channel.recipientAgentId ?? 'ceo')} />
                   <span><strong>{channel.label}</strong><small>{channel.detail}</small></span>
                 </button>
@@ -910,7 +923,7 @@ function QueueView({ state, onConnectCodex, refresh, notify, roomAddress, setRoo
             </div>
             <div className="channel-group task-room"><span>Task rooms</span>
               {channels.filter((channel) => channel.kind === 'task-room').map((channel) => (
-                <button className={`conversation-channel ${channel.conversationId === selected?.conversationId ? 'active' : ''}`} type="button" aria-pressed={channel.conversationId === selected?.conversationId} key={channel.conversationId} onClick={() => selectRoom(channel.conversationId)}>
+                <button className={`conversation-channel ${channel.conversationId === selected?.conversationId ? 'active' : ''}`} type="button" aria-label={`${channel.label} ${channel.detail}`} aria-pressed={channel.conversationId === selected?.conversationId} key={channel.conversationId} onClick={() => selectRoom(channel.conversationId)}>
                   <span className="channel-avatar"><FileText size={15} /></span>
                   <span><strong>{channel.label}</strong><small>{channel.detail}</small></span>
                 </button>
@@ -1254,27 +1267,24 @@ function TaskPlan({ state }) {
   const active = currentTask(state)
   const latest = active ?? state.tasks?.[0]
   const status = latest?.status
-  const stage = latest?.checkpoint?.stage
-  const executionStarted = ['delegating', 'tool-dispatch', 'tool-completed', 'specialist-completed'].includes(stage)
-  const terminal = ['failed', 'interrupted', 'cancelled'].includes(status)
-  const phases = [
-    ['Request received', latest ? 'completed' : 'ready'],
-    ['RJ planning', status === 'completed' || executionStarted ? 'completed' : terminal ? status : status === 'running' ? 'working' : 'queued'],
-    ['Specialist execution', status === 'completed' ? 'completed' : terminal ? status : executionStarted ? 'working' : 'queued'],
-    ['Return attributed result', status === 'completed' ? 'completed' : terminal ? status : 'queued'],
-  ]
+  const nodes = latest?.plan?.nodes ?? latest?.plan?.tasks ?? []
+  const steps = new Map((latest?.steps ?? []).map(step => [step.nodeId, step]))
   return (
     <section className="task-plan-panel" aria-label="Task plan">
       <div className="panel-title"><div><span className="card-kicker">{active ? active.status === 'running' ? 'Current execution' : 'Queued objective' : latest ? 'Latest recorded task' : 'Ready for work'}</span><h2>Task plan</h2></div>{latest ? <span>{status}</span> : null}</div>
-      <p className="plan-scope">Global workspace · independent of the viewed room</p>
+      <p className="plan-scope">Global execution snapshot · not the selected room</p>
       {latest ? <p className="plan-objective" title={`${latest.objective}\nTask ID: ${latest.taskId}`}>{latest.objective}</p> : <p className="plan-objective">Give RJ one bounded objective from the command dock.</p>}
+      {latest ? <p className="plan-task-id">Task ID · {latest.taskId}</p> : null}
       <ol className="plan-steps">
-        {phases.map(([label, phase], index) => (
-          <li className={`plan-step status-${phase}`} key={label}>
-            <span className="plan-marker">{phase === 'completed' ? '✓' : index + 1}</span>
-            <div><strong>{label}</strong><span>{phase === 'ready' ? 'Ready' : phase}</span></div>
+        {nodes.map((node, index) => {
+          const step = steps.get(node.nodeId)
+          const nodeStatus = step?.status ?? 'recorded'
+          return <li className={`plan-step status-${nodeStatus}`} key={node.nodeId ?? `${node.objective}-${index}`}>
+            <span className="plan-marker">{nodeStatus === 'completed' ? '✓' : index + 1}</span>
+            <div><strong>{node.objective ?? node.nodeId ?? 'Recorded plan node'}</strong><span>{nodeStatus}{node.specialistAgentId ? ` · ${node.specialistAgentId}` : ''}</span></div>
           </li>
-        ))}
+        })}
+        {!nodes.length ? <li className="plan-step status-recorded"><span className="plan-marker">—</span><div><strong>No recorded plan nodes yet</strong><span>Plan not loaded</span></div></li> : null}
       </ol>
     </section>
   )
@@ -1314,9 +1324,9 @@ function RightRail({ state, onDecision, railCollapsed }) {
   )
 }
 
-function MainWorkspace({ activeSection, state, frame, streamStatus, humanCommand, sendInput, notify, onNavigate, onDecision, onConnectCodex, onConnectGitHub, onModelSelect, onModelCheck, onDiscoverAgents, onImportAgents, onImportMainAgent, onAgentLifecycle, onAgentAccess, onRemoveAgent, onAgentModel, registerProject, submitProjectTask, reviewProject, commitProject, refresh, roomAddress, setRoomAddress }) {
-  if (['Agents', 'Settings'].includes(activeSection)) return <AgentsView settingsOnly={activeSection === 'Settings'} state={state} refresh={refresh} onNavigate={onNavigate} onModelSelect={onModelSelect} onModelCheck={onModelCheck} onDiscoverAgents={onDiscoverAgents} onImportAgents={onImportAgents} onImportMainAgent={onImportMainAgent} onAgentLifecycle={onAgentLifecycle} onAgentAccess={onAgentAccess} onRemoveAgent={onRemoveAgent} onAgentModel={onAgentModel} onConnectGitHub={onConnectGitHub} />
-  if (activeSection === 'Queue') return <QueueView state={state} onConnectCodex={onConnectCodex} refresh={refresh} notify={notify} roomAddress={roomAddress} setRoomAddress={setRoomAddress} />
+function MainWorkspace({ activeSection, state, frame, streamStatus, humanCommand, sendInput, notify, onNavigate, onOpenSetup, onOpenConnections, onReturnToSetup, setupReturnTarget, onDecision, onConnectCodex, onConnectGitHub, onModelSelect, onModelCheck, onDiscoverAgents, onImportAgents, onImportMainAgent, onAgentLifecycle, onAgentAccess, onRemoveAgent, onAgentModel, registerProject, submitProjectTask, reviewProject, commitProject, refresh, onOutcomeAction, roomAddress, setRoomAddress }) {
+  if (['Agents', 'Settings'].includes(activeSection)) return <AgentsView settingsOnly={activeSection === 'Settings'} state={state} refresh={refresh} onNavigate={onNavigate} onOpenSetup={onOpenSetup} onOpenConnections={onOpenConnections} onReturnToSetup={onReturnToSetup} setupReturnTarget={setupReturnTarget} onModelSelect={onModelSelect} onModelCheck={onModelCheck} onDiscoverAgents={onDiscoverAgents} onImportAgents={onImportAgents} onImportMainAgent={onImportMainAgent} onAgentLifecycle={onAgentLifecycle} onAgentAccess={onAgentAccess} onRemoveAgent={onRemoveAgent} onAgentModel={onAgentModel} onConnectGitHub={onConnectGitHub} />
+  if (activeSection === 'Queue') return <QueueView state={state} onConnectCodex={onConnectCodex} refresh={refresh} notify={notify} onNavigate={onNavigate} onOutcomeAction={onOutcomeAction} roomAddress={roomAddress} setRoomAddress={setRoomAddress} />
   if (activeSection === 'Workers') return <AgentWorkers state={state} refresh={refresh} notify={notify} />
   if (activeSection === 'Clients') return <ClientWorkspace />
   if (activeSection === 'Media') return <MediaStudio state={state} notify={notify} refresh={refresh} />
@@ -1497,6 +1507,16 @@ function StatusBar({ state, onSuspend, onTask, onConnectCodex, roomAddress, setR
   )
 }
 
+function ComposerUnavailable({ onRefresh }) {
+  return <footer className="statusbar conversation-unavailable" aria-label="Conversation composer unavailable">
+    <div className="conversation-unavailable-card" role="status">
+      <strong>Composer unavailable</strong>
+      <span>Chimera has not confirmed this workspace/operator identity. Sending is disabled until the scoped workspace state is available.</span>
+      <button type="button" onClick={() => void onRefresh?.()}>Refresh workspace</button>
+    </div>
+  </footer>
+}
+
 function DecisionDialog({ decision, close, act }) {
   const { blocked } = useContext(DecisionResponsesContext)
   const dialog = useRef(null)
@@ -1549,8 +1569,11 @@ function DecisionDialog({ decision, close, act }) {
 export function App() {
   const [state, setState] = useState(null)
   const [activeSection, setActiveSection] = useState('Queue')
+  const [setupOpen, setSetupOpen] = useState(false)
+  const [setupState, setSetupState] = useState(null)
   useEffect(() => { setActiveSection(initialClientSection(window.location.search)) }, [])
   const [roomAddress, setRoomAddress] = useState(null)
+  const [navigationTargetVersion, setNavigationTargetVersion] = useState(0)
   const [frame, setFrame] = useState({ data: null, width: 1600, height: 900 })
   const [streamStatus, setStreamStatus] = useState('Connecting to live browser…')
   const [toast, setToast] = useState('')
@@ -1561,6 +1584,8 @@ export function App() {
   const socket = useRef(null)
   const refreshedLogin = useRef(null)
   const latestRefresh = useRef(null)
+  const setupReturnTarget = useRef(null)
+  const composerTargetRef = useRef(null)
 
   const refresh = useCallback(async () => {
     const request = { confirmed: false }
@@ -1692,6 +1717,55 @@ export function App() {
     } catch (cause) { setToast(browserCommandFailureMessage(cause)) }
   }
 
+  const onOutcomeAction = useCallback((action) => {
+    const focusTaskControl = (selector, message) => {
+      const element = typeof document === 'undefined' ? null : document.querySelector(selector)
+      if (typeof HTMLElement !== 'undefined' && element instanceof HTMLElement) {
+        element.focus()
+        setToast(message)
+        return true
+      }
+      setToast(`${message} The selected task controls are not currently available.`)
+      return false
+    }
+    const focusTaskControlButton = (predicate, message) => {
+      const button = typeof document === 'undefined'
+        ? null
+        : [...document.querySelectorAll('.task-controls button')].find(candidate => predicate(candidate))
+      if (typeof HTMLElement !== 'undefined' && button instanceof HTMLElement) {
+        button.focus()
+        setToast(message)
+        return true
+      }
+      setToast(`${message} No matching saved action is available.`)
+      return false
+    }
+    if (action === 'inspect') return
+    if (action === 'continue' || action === 'retry') {
+      focusTaskControl('input[aria-label="Continuation objective"], input[aria-label="Task guidance"]',
+        action === 'retry'
+          ? 'No automatic replay was sent. Enter an explicit continuation or guidance objective and review it before sending.'
+          : 'Enter an explicit continuation objective, then review and send it from Task controls.')
+      return
+    }
+    if (action === 'resume-queued') {
+      focusTaskControlButton(button => button.textContent?.trim() === 'Resume queued task',
+        'Review the saved task destination, then click Resume queued task to send the server-validated request.')
+      return
+    }
+    if (action === 'reconcile') {
+      focusTaskControlButton(button => button.textContent?.trim() === 'Check saved outcome',
+        'Inspect the saved receipt before deciding. No task request was retried.')
+      return
+    }
+    if (action === 'reconnect') {
+      setActiveSection('Settings')
+      setToast('Open Connections to reconnect the required provider. This does not resume or replay the task.')
+      return
+    }
+    setToast('No automatic task action was sent. Inspect the selected task before continuing.')
+  }, [])
+
   const selectModel = async (selection) => {
     try {
       await post('/api/models/select', selection)
@@ -1737,6 +1811,22 @@ export function App() {
     return { accepted: true, message: refreshed ? message : `${message}. The latest workspace state could not be confirmed at acknowledgement; the send was accepted. Do not resend it to refresh the view.` }
   }
 
+  const submitComposer = async (request) => {
+    const result = await post(request.endpoint, request.body)
+    const resultMessage = typeof result?.message === 'string' ? result.message : 'Request accepted.'
+    try {
+      const refreshed = await refresh()
+      return refreshed === false ? { ...result, message: `${resultMessage} The latest workspace state could not be confirmed; do not resend.` } : result
+    } catch {
+      return { ...result, message: `${resultMessage} The latest workspace state could not be confirmed; do not resend.` }
+    }
+  }
+
+  const lookupComposer = async (requestId, target) => {
+    const path = target?.mode === 'ask' ? `/api/conversations/asks/${encodeURIComponent(requestId)}` : `/api/tasks/receipts/${encodeURIComponent(requestId)}`
+    return api(path, { cache: 'no-store' })
+  }
+
   const connectCodex = async () => {
     try {
       await startCodexBrowserLogin({
@@ -1760,6 +1850,57 @@ export function App() {
       setToast(cause.message.replaceAll('_', ' ').toLowerCase())
       throw cause
     }
+  }
+
+  const openSetup = (context = {}) => {
+    const contextTarget = context?.target && typeof context.target === 'object' && typeof context.target.mode === 'string' ? context.target : null
+    const contextDraftKey = typeof context?.draftKey === 'string' ? context.draftKey : null
+    const composerTarget = contextTarget ?? composerTargetRef.current ?? null
+    composerTargetRef.current = composerTarget
+    setupReturnTarget.current = { section: activeSection, roomAddress, taskId: roomAddress?.taskId ?? null, agentId: setupState?.agentId ?? null, setupStep: setupState?.step ?? 0,
+      ...(composerTarget ? { composerTarget: structuredClone(composerTarget) } : {}), ...(contextDraftKey ? { draftKey: contextDraftKey } : {}) }
+    setSetupState(current => current ?? {})
+    setSetupOpen(true)
+  }
+
+  const openSetupConnections = (context = {}) => {
+    const contextTarget = context?.target && typeof context.target === 'object' && typeof context.target.mode === 'string' ? context.target : null
+    const contextDraftKey = typeof context?.draftKey === 'string' ? context.draftKey : null
+    const composerTarget = contextTarget ?? composerTargetRef.current ?? setupReturnTarget.current?.composerTarget ?? null
+    composerTargetRef.current = composerTarget
+    if (!setupReturnTarget.current) {
+      setupReturnTarget.current = { section: activeSection, roomAddress, taskId: roomAddress?.taskId ?? null, agentId: setupState?.agentId ?? null, setupStep: setupState?.step ?? 0,
+        ...(composerTarget ? { composerTarget: structuredClone(composerTarget) } : {}), ...(contextDraftKey ? { draftKey: contextDraftKey } : {}) }
+    } else if (composerTarget) {
+      setupReturnTarget.current = { ...setupReturnTarget.current, composerTarget: structuredClone(composerTarget), ...(contextDraftKey ? { draftKey: contextDraftKey } : {}) }
+    }
+    setSetupOpen(false)
+    setActiveSection('Settings')
+  }
+
+  const returnToSetup = () => {
+    const target = setupReturnTarget.current
+    if (!target) return
+    setActiveSection(target.section)
+    setRoomAddress(target.roomAddress)
+    setSetupOpen(true)
+  }
+
+  const closeSetup = () => {
+    const target = setupReturnTarget.current
+    if (target) {
+      setActiveSection(target.section)
+      setRoomAddress(target.roomAddress)
+    }
+    setupReturnTarget.current = null
+    setSetupOpen(false)
+  }
+
+  const completeSetup = async () => {
+    await refresh()
+    setSetupState(null)
+    setupReturnTarget.current = null
+    setSetupOpen(false)
   }
 
   const discoverAgents = () => post('/api/agents/discover')
@@ -1841,9 +1982,10 @@ export function App() {
   const submitProjectTask = async (input) => {
     try {
       const result = await post('/api/projects/tasks', input)
-      await refresh()
+      let refreshed = true
+      try { refreshed = (await refresh()) !== false } catch { refreshed = false }
       setToast('Project task queued. RJ will start it when the executor is available.')
-      return result
+      return refreshed ? result : { ...result, refreshFailed: true, message: 'Project task accepted. The latest workspace state could not be confirmed; do not resend.' }
     } catch (cause) {
       setToast(cause.message.replaceAll('_', ' ').toLowerCase())
       throw cause
@@ -1894,12 +2036,34 @@ export function App() {
 
   const humanControl = state?.controller.type === 'human'
   const shellClass = useMemo(() => `app-shell ${humanControl ? 'human-control' : 'agent-control'}${railCollapsed ? ' rail-collapsed' : ''}`, [humanControl, railCollapsed])
+  const roomComposerTarget = roomAddress?.taskId && state.draftScope?.workspaceId && state.draftScope?.operatorId ? {
+    mode: 'guidance', workspaceId: state.draftScope.workspaceId, operatorId: state.draftScope.operatorId,
+    conversationId: `task:${roomAddress.taskId}`, taskId: roomAddress.taskId,
+    recipientAgentIds: roomAddress.recipientAgentIds ?? [], replyTo: roomAddress.replyTo ?? null,
+    ...(roomAddress.replyLabel ? { replyLabel: roomAddress.replyLabel } : {}),
+  } : roomAddress?.agentId && state.draftScope?.workspaceId && state.draftScope?.operatorId ? {
+    mode: 'ask', workspaceId: state.draftScope.workspaceId, operatorId: state.draftScope.operatorId,
+    conversationId: roomAddress.conversationId ?? (roomAddress.agentId === 'ceo' ? 'main' : `agent:${roomAddress.agentId}`),
+    recipientAgentIds: [roomAddress.agentId], requestedSpecialistAgentId: roomAddress.agentId,
+  } : null
+  // A live Queue channel owns navigation while the setup overlay is closed.
+  // A saved setup target is only authoritative while returning through that
+  // overlay; otherwise it could pin the composer to an older agent channel.
+  const navigationComposerTarget = setupOpen
+    ? setupReturnTarget.current?.composerTarget ?? roomComposerTarget
+    : roomComposerTarget ?? setupReturnTarget.current?.composerTarget ?? null
 
   if (!state) return <OperatorRecovery error={error} onRetry={refresh} />
   return (
-    <DecisionResponsesContext.Provider value={decisionResponses}><TaskControlSession><ProjectWorkspaceSession><MediaSession><AgentUpdatesSession><QueueSession>
+    <DecisionResponsesContext.Provider value={decisionResponses}><TaskControlSession scope={state?.draftScope}><ProjectWorkspaceSession scope={state?.draftScope}><MediaSession><AgentUpdatesSession><QueueSession>
     <div className={shellClass}>
-      <WorkspaceNavigation activeSection={activeSection} pendingDecisions={state.decisions?.length ?? 0} onNavigate={section => { setActiveSection(section); setRoomAddress(null) }} />
+      <WorkspaceNavigation activeSection={activeSection} pendingDecisions={state.decisions?.length ?? 0} onNavigate={section => {
+        setActiveSection(section)
+        setNavigationTargetVersion(current => current + 1)
+        if (!setupOpen) setRoomAddress(current => current
+          ? { ...current, ...(current.taskId ? { recipientAgentIds: [], replyTo: null, replyLabel: null } : {}) }
+          : null)
+      }} />
       <TopBar state={state} onControl={control} onModelSelect={selectModel} railCollapsed={railCollapsed} onToggleRail={() => setRailCollapsed((current) => !current)} />
       {error ? <div className="connection-alert" role="alert">Connection problem: {browserCommandFailureMessage(error)}. Displayed state may be stale.</div> : null}
       <MainWorkspace
@@ -1911,7 +2075,12 @@ export function App() {
         sendInput={sendInput}
         notify={setToast}
         onNavigate={setActiveSection}
+        onOpenSetup={openSetup}
+        onOpenConnections={openSetupConnections}
+        onReturnToSetup={returnToSetup}
+        setupReturnTarget={setupReturnTarget.current}
         onDecision={decision}
+        onOutcomeAction={onOutcomeAction}
         onConnectCodex={connectCodex}
         onConnectGitHub={connectGitHub}
         onModelSelect={selectModel}
@@ -1931,8 +2100,30 @@ export function App() {
         roomAddress={roomAddress}
         setRoomAddress={setRoomAddress}
       />
+      {setupOpen ? <AgentSetupWizard
+        state={state}
+        onClose={closeSetup}
+        onComplete={completeSetup}
+        refresh={refresh}
+        initialState={setupState}
+        onStateChange={setSetupState}
+        onOpenConnections={openSetupConnections}
+        onDiscoverAgents={discoverAgents}
+        onImportAgents={importAgents}
+        onImportMainAgent={importMainAgent}
+      /> : null}
       <RightRail state={state} onDecision={decision} railCollapsed={railCollapsed} />
-      <StatusBar state={state} onSuspend={suspend} onTask={submitTask} onConnectCodex={connectCodex} roomAddress={roomAddress} setRoomAddress={setRoomAddress} />
+      {state.draftScope?.workspaceId && state.draftScope?.operatorId ? <ConversationComposer
+        state={state}
+        onSubmit={submitComposer}
+        onLookup={lookupComposer}
+        onOpenSetup={openSetup}
+        onConnectCodex={connectCodex}
+        onSuspend={suspend}
+        onTargetChange={({ target }) => { composerTargetRef.current = target }}
+        initialTarget={navigationComposerTarget}
+        initialTargetVersion={navigationTargetVersion}
+      /> : <ComposerUnavailable onRefresh={refresh} />}
       {toast ? <div className="toast" role="status">{toast}</div> : null}
       <DecisionDialog decision={reviewing} close={() => setReviewing(null)} act={(action) => decision(reviewing, action)} />
     </div>

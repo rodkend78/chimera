@@ -195,6 +195,7 @@ function assertEnvelope(envelope) {
     || !MESSAGE_TYPES.has(payload.type)
     || !isBoundedString(payload.recipientAgentId, 256)
     || !isBoundedString(payload.taskId, 256)
+    || (payload.nodeId !== undefined && payload.nodeId !== null && !isBoundedString(payload.nodeId, 128))
     || (payload.parentMessageId !== null && !isBoundedString(payload.parentMessageId, 256))) {
     throw new TypeError('invalid message payload')
   }
@@ -261,6 +262,7 @@ export function createAgentMessageEnvelope({
   messageId,
   type,
   taskId,
+  nodeId = null,
   parentMessageId = null,
   issuedAt,
   expiresAt,
@@ -278,6 +280,7 @@ export function createAgentMessageEnvelope({
       type,
       recipientAgentId,
       taskId,
+      nodeId,
       parentMessageId,
       issuedAt,
       expiresAt,
@@ -420,6 +423,7 @@ export function verifyAgentMessage({
     messageId: envelope.payload.messageId,
     type: envelope.payload.type,
     taskId: envelope.payload.taskId,
+    nodeId: envelope.payload.nodeId ?? null,
     attribution: {
       senderAgentId: envelope.sender.agentId,
       senderKeyId: envelope.sender.keyId,

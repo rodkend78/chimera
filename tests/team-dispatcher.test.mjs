@@ -205,7 +205,9 @@ for (const boundary of ['before', 'after']) test(`timeout selects the journal ou
   const result = await work
   release.release()
   assert.deepEqual((await f.dispatcher.drain())[0], result)
-  assert.equal(result.status, boundary === 'before' ? 'failed' : 'succeeded')
+  // A timeout racing the mailbox commit leaves the external effect
+  // indeterminate until reconciliation; it is not a safe failed result.
+  assert.equal(result.status, boundary === 'before' ? 'unknown' : 'succeeded')
   assert.equal(f.mailbox.list()[0].status, boundary === 'before' ? 'interrupted' : 'completed')
   assert.equal(events.filter(event => event.kind === 'structured_result').length, boundary === 'before' ? 0 : 1)
 })
@@ -319,4 +321,339 @@ test('restart preserves replied rows and fences processing while queued rows nev
   await Promise.all([one, two, closing])
   assert.equal(runs, 1)
   assert.equal(teamMessagingProjection(reopened, 'root').deliveries.length, 2)
+})
+
+test('dispatcher exposes a graph-plan admission boundary for explicit plans', () => {
+  assert.equal(typeof TeamDispatcher.prototype.dispatchPlan, 'function')
+})
+
+test('initial queued-step persistence failure releases an effect-free plan without replay', async t => {
+  const executions = []
+  const f = await fixture(t, async id => {
+    executions.push(id)
+    return { summary: id }
+  })
+  const firstSteps = []
+  const first = await f.dispatcher.dispatchPlan({
+    tasks: [{ nodeId: 'first', specialistAgentId: 'ace', objective: 'Do not admit', acceptanceCriteria: ['No effects'], dependsOn: [] }],
+    planHash: '9'.repeat(64),
+    revision: 1,
+    resolveResources: async () => [{ key: 'workspace:first', access: 'read', verified: true }],
+    onStep: async step => {
+      firstSteps.push(step)
+      throw Object.assign(new Error('FIXTURE_INITIAL_STEP_PERSIST_FAILED'), { code: 'FIXTURE_INITIAL_STEP_PERSIST_FAILED' })
+    },
+  }).catch(error => error)
+  assert.equal(first.code, 'FIXTURE_INITIAL_STEP_PERSIST_FAILED')
+  assert.equal(firstSteps.length, 1)
+  assert.deepEqual(executions, [])
+  assert.deepEqual(f.mailbox.list({ taskId: 'root' }), [])
+
+  const results = await f.dispatcher.dispatchPlan({
+    tasks: [{ nodeId: 'second', specialistAgentId: 'ace', objective: 'Admit once', acceptanceCriteria: ['Complete'], dependsOn: [] }],
+    planHash: 'a'.repeat(64),
+    revision: 1,
+    resolveResources: async () => [{ key: 'workspace:second', access: 'read', verified: true }],
+    onStep: async () => {},
+  })
+  assert.equal(results[0].status, 'succeeded')
+  assert.deepEqual(executions, ['ace'])
+  await f.dispatcher.drain()
+})
+
+test('graph plans overlap proven independent reads and return normalized plan order', async t => {
+  const release = gate(), entered = gate(); let active = 0; let maximum = 0; let started = 0; let f
+  f = await fixture(t, async (id, content) => {
+    active += 1; maximum = Math.max(maximum, active); started += 1
+    if (started === 2) entered.release()
+    await release.promise
+    active -= 1
+    return { summary: content.objective }
+  })
+  const plan = f.dispatcher.dispatchPlan({
+    tasks: [
+      { nodeId: 'slow', specialistAgentId: 'ace', objective: 'Slow', acceptanceCriteria: ['Done'], dependsOn: [] },
+      { nodeId: 'fast', specialistAgentId: 'iris', objective: 'Fast', acceptanceCriteria: ['Done'], dependsOn: [] },
+    ],
+    planHash: 'a'.repeat(64),
+    revision: 1,
+    resolveResources: async node => [{ key: `workspace:${node.nodeId}`, access: 'read', verified: true }],
+    onStep: async () => {},
+  })
+  await entered.promise
+  assert.equal(maximum, 2)
+  release.release()
+  const results = await plan
+  assert.deepEqual(results.map(result => result.nodeId), ['slow', 'fast'])
+  await f.dispatcher.drain()
+})
+
+test('a physically settled legacy job does not block a later graph plan', async t => {
+  const f = await fixture(t, async id => ({ summary: `${id} completed.` }))
+  await f.dispatcher.delegate({ specialistAgentId: 'ace', objective: 'Legacy work', acceptanceCriteria: ['Complete it.'] })
+  await f.dispatcher.drain()
+
+  const graph = f.dispatcher.dispatchPlan({
+    tasks: [{ nodeId: 'iris-node', specialistAgentId: 'iris', objective: 'Graph work', acceptanceCriteria: ['Complete it.'], dependsOn: [] }],
+    planHash: 'a'.repeat(64),
+    revision: 1,
+    resolveResources: async () => null,
+    onStep: async () => {},
+  })
+  const results = await Promise.race([
+    graph,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('SETTLED_LEGACY_BLOCKED_GRAPH')), 500)),
+  ])
+  assert.equal(results[0].status, 'succeeded')
+  await f.dispatcher.drain()
+})
+
+test('failed graph predecessors block dependents before their executor runs', async t => {
+  const executions = []
+  const f = await fixture(t, async id => {
+    executions.push(id)
+    if (id === 'ace') throw Object.assign(new Error('failed root'), { code: 'SPECIALIST_FAILED' })
+    return { summary: id }
+  })
+  const results = await f.dispatcher.dispatchPlan({
+    tasks: [
+      { nodeId: 'root', specialistAgentId: 'ace', objective: 'Fail', acceptanceCriteria: ['Fail'], dependsOn: [] },
+      { nodeId: 'child', specialistAgentId: 'iris', objective: 'Must not run', acceptanceCriteria: ['Block'], dependsOn: ['root'] },
+    ],
+    planHash: 'b'.repeat(64),
+    revision: 1,
+    resolveResources: async () => [{ key: 'workspace:shared', access: 'write', verified: true }],
+    onStep: async () => {},
+  })
+  assert.deepEqual(executions, ['ace'])
+  assert.deepEqual(results.map(result => result.status), ['failed', 'blocked'])
+  assert.equal(results[1].reason, 'TASK_DEPENDENCY_NOT_COMPLETED')
+  await f.dispatcher.drain()
+})
+
+for (const [label, specialistAgentIds, resolveResources] of [
+  ['same agent', ['ace', 'ace'], async node => [{ key: `workspace:${node.nodeId}`, access: 'read', verified: true }]],
+  ['shared write', ['ace', 'iris'], async () => [{ key: 'workspace:shared', access: 'write', verified: true }]],
+  ['unknown ownership', ['ace', 'iris'], async () => null],
+]) test(`graph plans serialize ${label} work`, async t => {
+  const entered = gate(), release = gate(); let active = 0; let maximum = 0; const executions = []
+  const f = await fixture(t, async id => {
+    executions.push(id); active += 1; maximum = Math.max(maximum, active)
+    entered.release(); await release.promise; active -= 1
+    return { summary: id }
+  })
+  const plan = f.dispatcher.dispatchPlan({
+    tasks: specialistAgentIds.map((specialistAgentId, index) => ({
+      nodeId: `${label.replaceAll(' ', '-')}-${index}`,
+      specialistAgentId,
+      objective: `${label} ${index}`,
+      acceptanceCriteria: ['Done'],
+      dependsOn: [],
+    })),
+    planHash: 'd'.repeat(64),
+    revision: 1,
+    resolveResources,
+    onStep: async () => {},
+  })
+  await entered.promise
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(executions.length, 1)
+  assert.equal(maximum, 1)
+  release.release()
+  await plan
+  await f.dispatcher.drain()
+})
+
+test('graph plans retain the existing maximum-four execution cap', async t => {
+  const entered = gate(), release = gate(); let active = 0; let maximum = 0; const executions = []
+  const ids = ['ace', 'iris', 'bob', 'eve', 'max', 'zoe']
+  const f = await fixture(t, async id => {
+    executions.push(id); active += 1; maximum = Math.max(maximum, active)
+    if (executions.length === 4) entered.release()
+    await release.promise; active -= 1
+    return { summary: id }
+  })
+  const plan = f.dispatcher.dispatchPlan({
+    tasks: ids.map((specialistAgentId, index) => ({ nodeId: `cap-${index}`, specialistAgentId,
+      objective: `Cap ${index}`, acceptanceCriteria: ['Done'], dependsOn: [] })),
+    planHash: 'e'.repeat(64),
+    revision: 1,
+    resolveResources: async node => [{ key: `workspace:${node.nodeId}`, access: 'read', verified: true }],
+    onStep: async () => {},
+  })
+  await entered.promise
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(maximum, 4)
+  assert.equal(executions.length, 4)
+  release.release()
+  const results = await plan
+  assert.deepEqual(results.map(result => result.nodeId), ids.map((_, index) => `cap-${index}`))
+  await f.dispatcher.drain()
+})
+
+test('graph timeout returns unknown but retains its claim until physical return', async t => {
+  const entered = gate(), release = gate(); let graphExecutions = 0; let legacyExecutions = 0
+  const f = await fixture(t, async id => {
+    if (id === 'ace') { graphExecutions += 1; entered.release(); await release.promise; return { summary: 'late graph' } }
+    legacyExecutions += 1
+    return { summary: 'legacy' }
+  }, { waitMs: 30 })
+  const graph = f.dispatcher.dispatchPlan({
+    tasks: [{ nodeId: 'late', specialistAgentId: 'ace', objective: 'Delayed', acceptanceCriteria: ['Unknown'], dependsOn: [] }],
+    planHash: 'f'.repeat(64),
+    revision: 1,
+    resolveResources: async () => [{ key: 'workspace:late', access: 'write', verified: true }],
+    onStep: async () => {},
+  })
+  await entered.promise
+  const graphResult = await graph
+  assert.equal(graphResult[0].status, 'unknown')
+  const legacy = f.dispatcher.delegate({ specialistAgentId: 'iris', objective: 'Wait for physical return', acceptanceCriteria: ['Run'] })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(legacyExecutions, 0)
+  release.release()
+  assert.equal((await legacy).status, 'succeeded')
+  assert.equal(graphExecutions, 1)
+  await f.dispatcher.drain()
+})
+
+test('graph result waits for the canonical terminal persistence barrier', async t => {
+  const entered = gate(), release = gate(); let settled = false
+  const f = await fixture(t, async () => ({ summary: 'done' }))
+  const graph = f.dispatcher.dispatchPlan({
+    tasks: [{ nodeId: 'persist', specialistAgentId: 'ace', objective: 'Persist', acceptanceCriteria: ['Durable'], dependsOn: [] }],
+    planHash: '1'.repeat(64),
+    revision: 1,
+    resolveResources: async () => [{ key: 'workspace:persist', access: 'write', verified: true }],
+    onStep: async step => {
+      if (step.status === 'completed') { entered.release(); await release.promise }
+    },
+  }).then(result => { settled = true; return result })
+  await entered.promise
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(settled, false)
+  release.release()
+  assert.equal((await graph)[0].status, 'succeeded')
+  await f.dispatcher.drain()
+})
+
+test('terminal projection failure returns unknown and stops queued graph admissions without rerun', async t => {
+  const executions = []; let terminalAttempts = 0
+  const f = await fixture(t, async id => { executions.push(id); return { summary: id } })
+  const graph = f.dispatcher.dispatchPlan({
+    tasks: [
+      { nodeId: 'first', specialistAgentId: 'ace', objective: 'First', acceptanceCriteria: ['Run'], dependsOn: [] },
+      { nodeId: 'second', specialistAgentId: 'ace', objective: 'Second', acceptanceCriteria: ['Do not rerun'], dependsOn: [] },
+    ],
+    planHash: '2'.repeat(64),
+    revision: 1,
+    resolveResources: async node => [{ key: `workspace:${node.nodeId}`, access: 'read', verified: true }],
+    onStep: async step => {
+      if (step.status === 'completed' && terminalAttempts++ === 0) throw new Error('projection unavailable')
+    },
+  })
+  const results = await graph
+  assert.equal(executions.length, 1)
+  assert.ok(results.every(result => result.status === 'unknown'), JSON.stringify(results))
+  await f.dispatcher.close()
+})
+
+test('graph parent peer asks fail before child delivery when claims are retained', async t => {
+  let f; let childExecutions = 0
+  f = await fixture(t, async (id, _content, envelope) => {
+    if (id === 'iris') childExecutions += 1
+    if (id === 'ace') {
+      await assert.rejects(
+        f.dispatcher.executePeerTool(envelope.messageId, 'agent_ask', { recipientAgentId: 'iris', objective: 'Conflicting child' }),
+        { code: 'TEAM_RESOURCE_DEPENDENCY_CYCLE' },
+      )
+    }
+    return { summary: id }
+  })
+  const results = await f.dispatcher.dispatchPlan({
+    tasks: [{ nodeId: 'parent', specialistAgentId: 'ace', objective: 'Parent', acceptanceCriteria: ['No deadlock'], dependsOn: [] }],
+    planHash: '3'.repeat(64),
+    revision: 1,
+    resolveResources: async () => [{ key: 'workspace:parent', access: 'write', verified: true }],
+    onStep: async () => {},
+  })
+  assert.equal(results[0].status, 'succeeded')
+  assert.equal(childExecutions, 0)
+  assert.equal(f.mailbox.list().filter(row => row.agentId === 'iris').length, 0)
+  await f.dispatcher.drain()
+})
+
+test('graph resource resolver rechecks the proposal fence before execution', async t => {
+  const entered = gate(), release = gate(); let revision = 0; let executions = 0
+  const f = await fixture(t, async () => { executions += 1; return { summary: 'stale' } })
+  const assertCurrent = () => {
+    if (revision !== 0) throw Object.assign(new Error('TASK_PLAN_STALE'), { code: 'TASK_PLAN_STALE' })
+  }
+  const graph = f.dispatcher.dispatchPlan({
+    tasks: [{ nodeId: 'stale', specialistAgentId: 'ace', objective: 'Stale', acceptanceCriteria: ['Do not run'], dependsOn: [] }],
+    planHash: '4'.repeat(64),
+    revision: 1,
+    assertProposalCurrent: assertCurrent,
+    resolveResources: async () => { entered.release(); await release.promise; return [{ key: 'workspace:stale', access: 'write', verified: true }] },
+    onStep: async () => {},
+  }).catch(error => error)
+  await entered.promise
+  revision += 1
+  release.release()
+  assert.equal((await graph).code, 'TASK_PLAN_STALE')
+  assert.equal(executions, 0)
+  await f.dispatcher.drain()
+})
+
+test('running-step persistence failure fences siblings before any executor starts', async t => {
+  const executions = []; let runningWrites = 0
+  const f = await fixture(t, async id => { executions.push(id); return { summary: id } })
+  const graph = f.dispatcher.dispatchPlan({
+    tasks: [
+      { nodeId: 'persist-fails', specialistAgentId: 'ace', objective: 'Persistence failure', acceptanceCriteria: ['Stop'], dependsOn: [] },
+      { nodeId: 'sibling', specialistAgentId: 'iris', objective: 'Must not execute', acceptanceCriteria: ['Stop'], dependsOn: [] },
+    ],
+    planHash: '5'.repeat(64),
+    revision: 1,
+    resolveResources: async () => [{ key: 'workspace:shared', access: 'write', verified: true }],
+    onStep: async step => {
+      if (step.status === 'running' && runningWrites++ === 0) throw Object.assign(new Error('FIXTURE_STEP_PERSIST_FAILED'), { code: 'FIXTURE_STEP_PERSIST_FAILED' })
+    },
+  })
+  const results = await graph
+  assert.deepEqual(executions, [])
+  assert.ok(results.every(result => result.status === 'unknown'), JSON.stringify(results))
+  await f.dispatcher.close()
+})
+
+test('resolved queued claims are prospective until dependency nodes acquire them', async t => {
+  const rootEntered = gate(), releaseRoot = gate(); const resolved = []; const executions = []
+  const f = await fixture(t, async id => {
+    executions.push(id)
+    if (id === 'ace') { rootEntered.release(); await releaseRoot.promise }
+    return { summary: id }
+  })
+  const graph = f.dispatcher.dispatchPlan({
+    tasks: [
+      { nodeId: 'root', specialistAgentId: 'ace', objective: 'Root', acceptanceCriteria: ['Root'], dependsOn: [] },
+      { nodeId: 'middle', specialistAgentId: 'iris', objective: 'Middle', acceptanceCriteria: ['Middle'], dependsOn: ['root'] },
+      { nodeId: 'leaf', specialistAgentId: 'bob', objective: 'Leaf', acceptanceCriteria: ['Leaf'], dependsOn: ['middle'] },
+    ],
+    planHash: '6'.repeat(64),
+    revision: 1,
+    resolveResources: async node => {
+      resolved.push(node.nodeId)
+      return [{ key: node.nodeId === 'root' ? 'workspace:root' : 'workspace:shared', access: 'write', verified: true }]
+    },
+    onStep: async () => {},
+  })
+  await rootEntered.promise
+  for (let attempt = 0; resolved.length < 3 && attempt < 100; attempt += 1) await new Promise(resolve => setTimeout(resolve, 1))
+  assert.deepEqual(resolved.toSorted(), ['leaf', 'middle', 'root'])
+  assert.deepEqual(executions, ['ace'])
+  releaseRoot.release()
+  const results = await graph
+  assert.deepEqual(results.map(result => result.nodeId), ['root', 'middle', 'leaf'])
+  assert.deepEqual(executions, ['ace', 'iris', 'bob'])
+  await f.dispatcher.drain()
 })

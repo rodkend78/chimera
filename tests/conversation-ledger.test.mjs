@@ -176,3 +176,173 @@ test('conversation ledger rejects unsafe shapes, duplicates, and corrupt history
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test('conversation ledger atomically reserves Ask requests and restores pending asks as unknown', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-conversation-ask-'))
+  const filePath = join(directory, 'messages.jsonl')
+  try {
+    const ledger = await DurableConversationLedger.open({ filePath, audit: new MemoryAuditLog() })
+    const question = {
+      messageId: 'ask-question-1',
+      conversationId: 'agent:ace',
+      senderAgentId: 'rod',
+      recipientAgentIds: ['ace'],
+      kind: 'question',
+      mode: 'ask',
+      requestId: 'ask-1',
+      content: 'Explain this design.',
+    }
+    const reserved = await ledger.beginAsk({ requestId: 'ask-1', requestHash: 'a'.repeat(64), message: question })
+    assert.equal(reserved.status, 'pending')
+    assert.equal(reserved.message.messageId, 'ask-question-1')
+    assert.equal((await ledger.getAsk('ask-1')).status, 'pending')
+    await assert.rejects(ledger.beginAsk({ requestId: 'ask-1', requestHash: 'b'.repeat(64), message: question }), /ASK_REQUEST_CONFLICT/)
+    await ledger.close()
+
+    const reopened = await DurableConversationLedger.open({ filePath, audit: new MemoryAuditLog() })
+    assert.equal((await reopened.getAsk('ask-1')).status, 'unknown')
+    assert.equal((await reopened.getAsk('ask-1')).failureCode, 'ASK_OUTCOME_UNKNOWN')
+    await reopened.close()
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('conversation ledger finishes Ask in the same canonical room and rejects mismatched answer metadata', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-conversation-ask-finish-'))
+  const filePath = join(directory, 'messages.jsonl')
+  try {
+    const ledger = await DurableConversationLedger.open({ filePath, audit: new MemoryAuditLog() })
+    await ledger.beginAsk({
+      requestId: 'ask-2',
+      requestHash: 'c'.repeat(64),
+      message: {
+        messageId: 'ask-question-2',
+        conversationId: 'main',
+        senderAgentId: 'rod',
+        recipientAgentIds: ['ceo'],
+        kind: 'question',
+        mode: 'ask',
+        requestId: 'ask-2',
+        content: 'Answer this.',
+      },
+    })
+    const answer = await ledger.finishAsk({
+      requestId: 'ask-2',
+      message: {
+        messageId: 'ask-answer-2',
+        conversationId: 'main',
+        senderAgentId: 'ceo',
+        recipientAgentIds: ['rod'],
+        kind: 'answer',
+        mode: 'ask',
+        requestId: 'ask-2',
+        replyTo: 'ask-question-2',
+        content: 'The answer.',
+        status: 'completed',
+      },
+      outcome: 'completed',
+    })
+    assert.equal(answer.status, 'completed')
+    assert.deepEqual(ledger.list('main').map((message) => message.kind), ['question', 'answer'])
+    await assert.rejects(ledger.finishAsk({
+      requestId: 'ask-2',
+      message: { ...answer.message, messageId: 'ask-answer-bad', conversationId: 'agent:ace' },
+      outcome: 'completed',
+    }), /ASK_REQUEST_CONFLICT/)
+    await ledger.close()
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('conversation ledger rejects restored Ask answers with forged participants', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-conversation-ask-restore-participants-'))
+  const filePath = join(directory, 'messages.jsonl')
+  const question = {
+    schema: 'chimera.conversation-message.v2',
+    messageId: 'ask-restore-question',
+    conversationId: 'agent:ace',
+    senderAgentId: 'rod',
+    recipientAgentIds: ['ace'],
+    role: 'human',
+    kind: 'question',
+    mode: 'ask',
+    requestId: 'ask-restore-participants',
+    requestHash: 'e'.repeat(64),
+    content: 'Restore this safely.',
+    status: 'sent',
+    createdAt: '2026-08-29T20:00:00.000Z',
+  }
+  try {
+    for (const answer of [
+      { senderAgentId: 'researcher', recipientAgentIds: ['rod'] },
+      { senderAgentId: 'ace', recipientAgentIds: ['researcher'] },
+    ]) {
+      await writeFile(filePath, `${JSON.stringify(question)}\n${JSON.stringify({
+        schema: 'chimera.conversation-message.v2',
+        messageId: `ask-restore-answer-${answer.senderAgentId}-${answer.recipientAgentIds[0]}`,
+        conversationId: 'agent:ace',
+        ...answer,
+        role: answer.senderAgentId === 'ace' ? 'agent' : 'agent',
+        kind: 'answer',
+        mode: 'ask',
+        requestId: 'ask-restore-participants',
+        replyTo: 'ask-restore-question',
+        content: 'Forged answer.',
+        status: 'completed',
+        createdAt: '2026-08-29T20:00:01.000Z',
+      })}\n`)
+      await assert.rejects(
+        DurableConversationLedger.open({ filePath, audit: new MemoryAuditLog() }),
+        /CONVERSATION_HISTORY_INVALID/,
+      )
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('conversation Ask mutations await asynchronous audit append and flush their durable boundary', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'chimera-conversation-ask-audit-'))
+  const filePath = join(directory, 'messages.jsonl')
+  let releaseAudit
+  let enteredAudit
+  const auditHeld = new Promise(resolve => { releaseAudit = resolve })
+  const auditEntered = new Promise(resolve => { enteredAudit = resolve })
+  const auditFacts = []
+  const audit = {
+    async append(fact) {
+      auditFacts.push(fact)
+      enteredAudit()
+      await auditHeld
+    },
+  }
+  try {
+    const ledger = await DurableConversationLedger.open({ filePath, audit })
+    const begin = ledger.beginAsk({
+      requestId: 'ask-audit-1',
+      requestHash: 'd'.repeat(64),
+      message: {
+        messageId: 'ask-audit-question',
+        conversationId: 'main',
+        senderAgentId: 'rod',
+        recipientAgentIds: ['ceo'],
+        kind: 'question',
+        mode: 'ask',
+        requestId: 'ask-audit-1',
+        content: 'Audit this ask.',
+      },
+    })
+    let settled = false
+    begin.then(() => { settled = true }, () => { settled = true })
+    await auditEntered
+    assert.equal(settled, false)
+    assert.equal(auditFacts.length, 1)
+    releaseAudit()
+    await begin
+    await ledger.close()
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})

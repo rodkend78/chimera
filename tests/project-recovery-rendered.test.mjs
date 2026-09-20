@@ -5,7 +5,7 @@ import { createServer } from 'vite'
 
 // Exercise the real React UI and API client; replace only disposable server
 // responses so these failure tests never submit live work or touch source.
-async function fixture(t, handler) {
+async function fixture(t, handler, stateHandler = null) {
   const server = await createServer({ configFile: new URL('../app/vite.config.js', import.meta.url).pathname,
     server: { host: '127.0.0.1', port: 0, hmr: false, proxy: {} } })
   await server.listen()
@@ -31,7 +31,10 @@ async function fixture(t, handler) {
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname
     if (path === '/api/operator/session') return route.fulfill({ json: { csrfToken: 'fixture', expiresAt: new Date(Date.now() + 60000).toISOString() } })
-    if (path === '/api/state') return route.fulfill({ json: state })
+    if (path === '/api/state') {
+      if (await stateHandler?.({ route, state })) return
+      return route.fulfill({ json: state })
+    }
     const body = route.request().method() === 'POST' ? route.request().postDataJSON() : null
     calls.push({ path, body })
     if (await handler?.({ route, path, body, state })) return
@@ -49,6 +52,14 @@ async function leaveProjects(page) {
 
 async function returnToProjects(page) {
   await page.getByRole('button', { name: 'Projects', exact: true }).click()
+}
+
+function gate(t) {
+  let release, arrive
+  const wait = new Promise(resolve => { release = resolve })
+  const arrived = new Promise(resolve => { arrive = resolve })
+  t.after(() => release())
+  return { release, arrive, wait, arrived }
 }
 
 test('project drafts survive section navigation but source review must be explicitly reloaded', { timeout: 20000 }, async t => {
@@ -165,6 +176,9 @@ test('pending source commit remains single-flight after navigation and cannot re
       arrived(); await new Promise(resolve => { release = resolve })
       await route.fulfill({ json: { committed: true } }); return true
     }
+    return false
+  }, async ({ state }) => {
+    state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }
     return false
   })
   t.after(() => release?.())
@@ -283,7 +297,41 @@ test('project drafts and access stay scoped while delayed submission cannot over
   assert.equal(await objective.inputValue(), 'Alpha newer draft')
   assert.equal(await page.getByRole('combobox', { name: 'Task access', exact: true }).inputValue(), 'connected')
   assert.equal(await page.getByRole('textbox', { name: 'Hosts for this task' }).inputValue(), 'github.com')
-  assert.deepEqual(calls.filter(call => call.path === '/api/projects/tasks').map(call => call.body), [{ projectId: 'alpha', objective: 'Alpha original objective', access: { profileId: 'connected', networkHosts: ['github.com'], ttlSeconds: 900 } }])
+  assert.deepEqual(calls.filter(call => call.path === '/api/projects/tasks').map(call => call.body), [{ projectId: 'alpha', objective: 'Alpha original objective', access: { profileId: 'connected', networkHosts: ['github.com'], ttlSeconds: 900 }, requirements: { priorityPreset: 'balanced' } }])
+  assert.deepEqual(errors, [])
+})
+
+test('accepted project task preserves a newer routing-only draft through reload', { timeout: 20000 }, async t => {
+  let release, arrived
+  const pending = new Promise(resolve => { arrived = resolve })
+  const { page, errors, calls } = await fixture(t, async ({ route, path, body, state }) => {
+    if (path !== '/api/projects/tasks') return false
+    arrived()
+    await new Promise(resolve => { release = resolve })
+    const task = { ...body, taskId: 'project-routing-task', status: 'queued' }
+    state.tasks.push(task)
+    await route.fulfill({ json: task })
+    return true
+  })
+  t.after(() => release?.())
+  const objective = page.getByRole('textbox', { name: 'Objective for RJ', exact: true })
+  const routing = page.getByRole('combobox', { name: 'Project task routing preference', exact: true })
+  await objective.fill('Keep the project routing draft')
+  await routing.selectOption('latency')
+  await page.getByRole('button', { name: 'Plan and delegate', exact: true }).click()
+  await pending
+  await routing.selectOption('quality')
+  release()
+  await page.getByRole('status').filter({ hasText: /Queue task: alpha/ }).waitFor()
+  assert.equal(await objective.inputValue(), 'Keep the project routing draft')
+  assert.equal(await routing.inputValue(), 'quality')
+  assert.equal(calls.find(call => call.path === '/api/projects/tasks').body.requirements.priorityPreset, 'latency')
+  await page.reload()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  const reloadedObjective = page.getByRole('textbox', { name: 'Objective for RJ', exact: true })
+  assert.equal(await reloadedObjective.inputValue(), 'Keep the project routing draft')
+  assert.equal(await page.getByRole('combobox', { name: 'Project task routing preference', exact: true }).inputValue(), 'quality')
+  assert.equal(calls.filter(call => call.path === '/api/projects/tasks').length, 1)
   assert.deepEqual(errors, [])
 })
 
@@ -306,5 +354,336 @@ test('acknowledged commit invalidates its review even if the subsequent review f
   await page.getByRole('alert').scrollIntoViewIfNeeded()
   await page.screenshot({ path: '/tmp/chimera-project-recovery-desktop.png' })
   assert.deepEqual(calls.filter(call => call.path === '/api/projects/commit').map(call => call.body), [{ taskId: 'alpha-task', message: 'Deliver reviewed change', expectedReviewDigest: 'review-one' }])
+  assert.deepEqual(errors, [])
+})
+
+test('ambiguous project admission restores an exact GET-only receipt without a second POST', { timeout: 20000 }, async t => {
+  let requestId = null
+  const { page, errors, calls } = await fixture(t, async ({ route, path, body, state }) => {
+    if (path === '/api/projects/tasks') {
+      requestId = body.requestId
+      await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+      return true
+    }
+    if (path === `/api/tasks/receipts/${encodeURIComponent(requestId)}`) {
+      await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId, operation: 'project-task', taskId: 'alpha-next', status: 'accepted' } })
+      return true
+    }
+    return false
+  }, async ({ state }) => {
+    state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }
+    return false
+  })
+  const objective = page.getByRole('textbox', { name: 'Objective for RJ', exact: true })
+  await objective.fill('Recover this exact project admission')
+  await page.getByRole('button', { name: 'Plan and delegate', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  assert.equal(calls.filter(call => call.path === '/api/projects/tasks').length, 1)
+  await page.reload()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await page.getByRole('button', { name: 'Check saved outcome', exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Check saved outcome', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Project task accepted/ }).waitFor()
+  assert.equal(calls.filter(call => call.path === '/api/projects/tasks').length, 1)
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('accepted project receipt clears only the unchanged submitted objective after exact lookup', { timeout: 20000 }, async t => {
+  let requestId = null
+  const { page, errors, calls } = await fixture(t, async ({ route, path, body }) => {
+    if (path === '/api/projects/tasks') {
+      requestId = body.requestId
+      await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+      return true
+    }
+    if (path === `/api/tasks/receipts/${encodeURIComponent(requestId)}`) {
+      await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId, operation: 'project-task', taskId: 'alpha-next', status: 'accepted' } })
+      return true
+    }
+    return false
+  }, async ({ state }) => {
+    state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }
+    return false
+  })
+  const objective = page.getByRole('textbox', { name: 'Objective for RJ', exact: true })
+  await objective.fill('  Clear after accepted project recovery  ')
+  await page.getByRole('button', { name: 'Plan and delegate', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  await page.reload()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await page.getByRole('button', { name: 'Check saved outcome', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Project task accepted/ }).waitFor()
+  assert.equal(await page.getByRole('textbox', { name: 'Objective for RJ', exact: true }).inputValue(), '')
+  assert.equal(calls.filter(call => call.path === '/api/projects/tasks').length, 1)
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('accepted project lookup preserves a newer objective entered while the exact receipt is pending', { timeout: 20000 }, async t => {
+  let requestId = null
+  let releaseLookup
+  let markLookup
+  const lookupArrived = new Promise(resolve => { markLookup = resolve })
+  const lookupRelease = new Promise(resolve => { releaseLookup = resolve })
+  t.after(() => releaseLookup?.())
+  const { page, errors, calls } = await fixture(t, async ({ route, path, body }) => {
+    if (path === '/api/projects/tasks') {
+      requestId = body.requestId
+      await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+      return true
+    }
+    if (path === `/api/tasks/receipts/${encodeURIComponent(requestId)}`) {
+      markLookup()
+      await lookupRelease
+      await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId, operation: 'project-task', taskId: 'alpha-next', status: 'accepted' } })
+      return true
+    }
+    return false
+  }, async ({ state }) => {
+    state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }
+    return false
+  })
+  const objective = page.getByRole('textbox', { name: 'Objective for RJ', exact: true })
+  await objective.fill('Original project objective')
+  await page.getByRole('button', { name: 'Plan and delegate', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  await page.getByRole('button', { name: 'Check saved outcome', exact: true }).click()
+  await lookupArrived
+  await objective.fill('Newer project objective')
+  releaseLookup()
+  await page.getByRole('status').filter({ hasText: /Project task accepted/ }).waitFor()
+  assert.equal(await objective.inputValue(), 'Newer project objective')
+  await page.reload()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  assert.equal(await page.getByRole('textbox', { name: 'Objective for RJ', exact: true }).inputValue(), 'Newer project objective')
+  assert.equal(calls.filter(call => call.path === '/api/projects/tasks').length, 1)
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('parallel project receipt checks are single-flight and cannot erase a replacement receipt', { timeout: 20000 }, async t => {
+  let requestId = null
+  let lookupCount = 0
+  let releaseFirstLookup
+  let releaseSecondLookup
+  let resolveFirstLookup
+  let resolveSecondLookup
+  const firstLookupArrived = new Promise(resolve => { resolveFirstLookup = resolve })
+  const secondLookupArrived = new Promise(resolve => { resolveSecondLookup = resolve })
+  const firstLookupRelease = new Promise(resolve => { releaseFirstLookup = resolve })
+  const secondLookupRelease = new Promise(resolve => { releaseSecondLookup = resolve })
+  t.after(() => { releaseFirstLookup?.(); releaseSecondLookup?.() })
+  const { page, errors, calls } = await fixture(t, async ({ route, path, body }) => {
+    if (path === '/api/projects/tasks') {
+      requestId = body.requestId
+      await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+      return true
+    }
+    if (path.startsWith('/api/tasks/receipts/')) {
+      lookupCount += 1
+      if (lookupCount === 1) resolveFirstLookup()
+      else resolveSecondLookup()
+      await (lookupCount === 1 ? firstLookupRelease : secondLookupRelease)
+      await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId: decodeURIComponent(path.split('/').pop()), operation: 'project-task', taskId: 'alpha-next', status: 'accepted' } })
+      return true
+    }
+    return false
+  }, async ({ state }) => {
+    state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }
+    return false
+  })
+  const objective = page.getByRole('textbox', { name: 'Objective for RJ', exact: true })
+  await objective.fill('Original project objective')
+  await page.getByRole('button', { name: 'Plan and delegate', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  const check = page.getByRole('button', { name: 'Check saved outcome', exact: true })
+  await check.click()
+  await check.click()
+  await firstLookupArrived
+  releaseFirstLookup()
+  await page.getByRole('status').filter({ hasText: /Project task accepted/ }).waitFor()
+  await objective.fill('Replacement project R2')
+  await page.getByRole('button', { name: 'Plan and delegate', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  await Promise.race([secondLookupArrived, new Promise(resolve => setTimeout(resolve, 500))])
+  assert.equal(lookupCount, 1, 'two rapid checks share one exact receipt GET')
+  if (lookupCount > 1) releaseSecondLookup()
+  await page.reload()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await page.getByRole('button', { name: 'Check saved outcome', exact: true }).waitFor()
+  assert.equal(await page.getByRole('textbox', { name: 'Objective for RJ', exact: true }).inputValue(), 'Replacement project R2')
+  assert.equal(calls.filter(call => call.path === '/api/projects/tasks').length, 2)
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('project lookup from an unmounted view uses the session draft and preserves newer objective and access', { timeout: 20000 }, async t => {
+  let requestId = null
+  const lookup = gate(t)
+  const { page, errors, calls } = await fixture(t, async ({ route, path, body }) => {
+    if (path === '/api/projects/tasks') {
+      requestId = body.requestId
+      await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+      return true
+    }
+    if (path === `/api/tasks/receipts/${encodeURIComponent(requestId)}`) {
+      lookup.arrive()
+      await lookup.wait
+      await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId, operation: 'project-task', taskId: 'alpha-next', status: 'accepted' } })
+      return true
+    }
+    return false
+  }, async ({ state }) => {
+    state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }
+    return false
+  })
+  const objective = page.getByRole('textbox', { name: 'Objective for RJ', exact: true })
+  await objective.fill('Original project objective')
+  await page.getByRole('combobox', { name: 'Task access', exact: true }).selectOption('connected')
+  await page.getByRole('textbox', { name: 'Hosts for this task' }).fill('github.com')
+  await page.getByRole('button', { name: 'Plan and delegate', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  await page.getByRole('button', { name: 'Check saved outcome', exact: true }).click()
+  await lookup.arrived
+  await page.getByRole('button', { name: 'Work', exact: true }).click()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  const remounted = page.getByRole('main', { name: 'Projects' })
+  await remounted.getByRole('textbox', { name: 'Objective for RJ', exact: true }).fill('Newer project after remount')
+  await remounted.getByRole('combobox', { name: 'Task access', exact: true }).selectOption('sandbox')
+  lookup.release()
+  await remounted.getByRole('status').filter({ hasText: /Project task accepted/ }).waitFor()
+  await page.reload()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  assert.equal(await page.getByRole('textbox', { name: 'Objective for RJ', exact: true }).inputValue(), 'Newer project after remount')
+  assert.equal(await page.getByRole('combobox', { name: 'Task access', exact: true }).inputValue(), 'sandbox')
+  assert.equal(await page.getByRole('textbox', { name: 'Hosts for this task' }).inputValue(), '')
+  assert.equal(calls.filter(call => call.path === '/api/projects/tasks').length, 1)
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('project recovery follows the visible receipt when another project is selected', { timeout: 20000 }, async t => {
+  const requestIds = new Map()
+  const lookups = []
+  const { page, errors, calls } = await fixture(t, async ({ route, path, body }) => {
+    if (path === '/api/projects/tasks') {
+      requestIds.set(body.projectId, body.requestId)
+      await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+      return true
+    }
+    if (path.startsWith('/api/tasks/receipts/')) {
+      const id = decodeURIComponent(path.split('/').pop())
+      lookups.push(id)
+      await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId: id, operation: 'project-task', taskId: 'child-task', projectId: 'fixture', status: 'accepted' } })
+      return true
+    }
+    return false
+  }, async ({ state }) => {
+    state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }
+    return false
+  })
+  const region = page.locator('.projects-region')
+  await region.getByRole('button', { name: /^beta local/ }).click()
+  await region.getByRole('textbox', { name: 'Objective for RJ', exact: true }).fill('Beta request remains unresolved')
+  await region.getByRole('button', { name: 'Plan and delegate', exact: true }).click()
+  await region.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  await region.getByRole('button', { name: 'Dismiss message', exact: true }).click()
+  await region.getByRole('button', { name: /^alpha local/ }).click()
+  await region.getByRole('textbox', { name: 'Objective for RJ', exact: true }).fill('Alpha request remains unresolved')
+  await region.getByRole('button', { name: 'Plan and delegate', exact: true }).click()
+  await region.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  assert.equal(requestIds.size, 2, 'both projects retain separate durable receipts')
+  const alphaRequestId = requestIds.get('alpha')
+  const betaRequestId = requestIds.get('beta')
+  await region.getByRole('button', { name: /^beta local/ }).click()
+  const notice = region.locator('.project-operation-notice')
+  assert.match(await notice.innerText(), /Queue task: alpha/)
+  await notice.getByRole('button', { name: 'Check saved outcome', exact: true }).click()
+  await notice.getByText(/Project task accepted/, { exact: false }).waitFor()
+  assert.deepEqual(lookups, [alphaRequestId], 'visible alpha notice must query alpha even while beta is selected')
+  assert.notEqual(alphaRequestId, betaRequestId)
+  assert.equal(calls.filter(call => call.path === '/api/projects/tasks').length, 2)
+  assert.deepEqual(errors, [])
+})
+
+test('project recovery stays pending during an in-flight POST and resurfaces after a late failure', { timeout: 20000 }, async t => {
+  let releasePost
+  let markPostStarted
+  let requestId = null
+  const postStarted = new Promise(resolve => { markPostStarted = resolve })
+  const heldPost = new Promise(resolve => { releasePost = resolve })
+  const { page, errors, calls } = await fixture(t, async ({ route, path, body }) => {
+    if (path === '/api/projects/tasks') {
+      requestId = body.requestId
+      markPostStarted()
+      await heldPost
+      await route.fulfill({ status: 503, json: { error: 'FIXTURE_ACK_LOST', reconciliationRequired: true } })
+      return true
+    }
+    if (path === `/api/tasks/receipts/${encodeURIComponent(requestId)}`) {
+      await route.fulfill({ json: { schema: 'chimera.task-admission-receipt.v1', requestId, operation: 'project-task', taskId: 'alpha-child', projectId: 'alpha', status: 'accepted' } })
+      return true
+    }
+    return false
+  }, async ({ state }) => {
+    state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }
+    return false
+  })
+  t.after(() => releasePost?.())
+  const region = page.locator('.projects-region')
+  const field = region.getByRole('textbox', { name: 'Objective for RJ', exact: true })
+  await field.fill('Pending project request')
+  await region.getByRole('button', { name: 'Plan and delegate', exact: true }).click()
+  await postStarted
+  const notice = region.locator('.project-operation-notice')
+  assert.match(await notice.innerText(), /Submitting project task/)
+  assert.equal(await notice.getByRole('button', { name: 'Check saved outcome', exact: true }).count(), 0, 'receipt lookup is unavailable while POST is in flight')
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 0)
+  releasePost()
+  await notice.filter({ hasText: /Outcome unknown/ }).waitFor()
+  await notice.getByRole('button', { name: 'Check saved outcome', exact: true }).waitFor()
+  assert.equal(calls.filter(call => call.path === '/api/projects/tasks').length, 1)
+  assert.deepEqual(errors, [])
+})
+
+test('saved task recovery stays visible while an unrelated project action is in flight', { timeout: 20000 }, async t => {
+  let releaseReview
+  let markReviewStarted
+  const reviewStarted = new Promise(resolve => { markReviewStarted = resolve })
+  const heldReview = new Promise(resolve => { releaseReview = resolve })
+  const { page, errors, calls } = await fixture(t, async ({ route, path }) => {
+    if (path === '/api/projects/tasks') {
+      await route.fulfill({ status: 503, json: { error: 'TASK_RESPONSE_LOST', reconciliationRequired: true } })
+      return true
+    }
+    if (path === '/api/projects/review') {
+      markReviewStarted()
+      await heldReview
+      await route.fulfill({ json: { changedFiles: [], patch: '', readyToCommit: false, status: 'completed', reviewDigest: 'review-one' } })
+      return true
+    }
+    return false
+  }, async ({ state }) => {
+    state.draftScope = { schema: 'chimera.draft-scope.v1', workspaceId: 'fixture-workspace', operatorId: 'fixture-operator' }
+    return false
+  })
+  t.after(() => releaseReview?.())
+  const region = page.locator('.projects-region')
+  await region.getByRole('textbox', { name: 'Objective for RJ', exact: true }).fill('Keep this task receipt visible')
+  await region.getByRole('button', { name: 'Plan and delegate', exact: true }).click()
+  await region.getByRole('status').filter({ hasText: /Outcome unknown/ }).waitFor()
+  await region.getByRole('button', { name: 'Dismiss message', exact: true }).click()
+  await region.getByRole('button', { name: 'Review changes', exact: true }).click()
+  await reviewStarted
+  const notice = region.locator('.project-operation-notice')
+  assert.match(await notice.innerText(), /Outcome unknown/)
+  const check = notice.getByRole('button', { name: 'Check saved outcome', exact: true })
+  assert.equal(await check.count(), 1)
+  assert.equal(await check.isDisabled(), true, 'receipt lookup must explain/wait while review holds the shared operation lock')
+  assert.match(await check.getAttribute('title'), /review/i)
+  assert.equal(calls.filter(call => call.path.startsWith('/api/tasks/receipts/')).length, 0)
+  releaseReview()
+  await notice.filter({ hasText: /Review request completed/ }).waitFor()
   assert.deepEqual(errors, [])
 })

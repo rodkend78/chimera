@@ -24,6 +24,26 @@ test('The runtime accepts a boundary-verified Antigravity choice without changin
   await assert.rejects(set(), { code: 'AGENT_MODEL_NOT_ELIGIBLE' })
 })
 
+test('The runtime accepts the measured Codex descriptor as a saved work preference without invoking it', async () => {
+  const registry = await LocalModelFabricRegistry.open({
+    config: { schema: 'chimera.model-routing.v1', region: 'us-west-2', codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high' }, bedrockRoutes: [] },
+    audit: new MemoryAuditLog(),
+    workingDirectory: '/workspace/chimera',
+    codexStatus: { configured: true, authentication: 'chatgpt-subscription' },
+    codexClient: { startThread() { return { async run() { throw new Error('Codex invocation is outside this save test') } } } },
+    bedrockModels: [],
+    bedrockProfiles: [],
+  })
+  const saved = []
+  const runtime = { agentId: 'ceo', humanId: 'human:rod', activeTasks: new Map(), tasks: { active: () => [] }, models: registry,
+    agentModelPolicy: { set: async (_agentId, preference) => { saved.push(preference); return structuredClone(preference) } } }
+  const description = registry.describeSelection({ mode: 'pinned', providerId: 'codex', model: 'gpt-5.6-sol' })
+  assert.equal(description.availability, 'available')
+  const result = await ChimeraBrowserRuntime.prototype.setAgentModel.call(runtime, 'ceo', { mode: 'pinned', providerId: 'codex', model: 'gpt-5.6-sol' })
+  assert.deepEqual(result, { mode: 'pinned', providerId: 'codex', model: 'gpt-5.6-sol' })
+  assert.deepEqual(saved, [result])
+})
+
 test('Antigravity is selectable per agent after explicit discovery but does not displace Auto', async () => {
   let ready = false, invocations = 0
   const antigravity = {
@@ -45,6 +65,10 @@ test('Antigravity is selectable per agent after explicit discovery but does not 
   const router = await registry.routerFor({ mode: 'pinned', providerId: 'antigravity', model: 'gemini-test-high' })
   assert.deepEqual(await router.route('Review', { stage: 'specialist', taskId: 'task-one' }), { summary: 'Delegated answer' })
   assert.equal(invocations, 1)
+  const policy = { set: async (_agentId, preference) => structuredClone(preference) }
+  const runtime = { agentId: 'ceo', humanId: 'human:rod', activeTasks: new Map(), tasks: { active: () => [] }, agentModelPolicy: policy, models: registry }
+  assert.equal(registry.describeSelection({ mode: 'pinned', providerId: 'antigravity', model: 'gemini-test-high' }).availability, 'available')
+  assert.equal((await ChimeraBrowserRuntime.prototype.setAgentModel.call(runtime, 'ceo', { mode: 'pinned', providerId: 'antigravity', model: 'gemini-test-high' })).model, 'gemini-test-high')
   const state = await registry.select({ providerId: 'antigravity', model: 'gemini-test-high' })
   assert.equal(state.selected.providerName, 'Antigravity')
   ready = false
@@ -68,6 +92,26 @@ test('Antigravity HTTP actions require operator authentication, CSRF and an empt
   assert.equal((await call('open', '{}', { cookie: 'fixture' }, 'GET')).status, 405)
   assert.equal(opens, 0)
   assert.equal((await call('open')).status, 202)
+  assert.deepEqual((await call('state', '', { cookie: 'fixture', 'x-chimera-csrf': 'fixture-csrf' }, 'GET')).body, { status: 'not-checked' })
   assert.equal((await call('refresh')).body.status, 'ready-to-test')
   assert.equal(opens, 1); assert.equal(refreshes, 1)
+})
+
+test('Antigravity HTTP state and refresh preserve the provider receiver binding', async () => {
+  const { handleAntigravityRequest } = await import('../src/browser/antigravity-api.mjs')
+  const connection = {
+    value: 0,
+    state() { return { status: `state-${this.value}` } },
+    async refresh() { this.value += 1; return this.state() },
+    async openDesktop() { this.value += 1; return this.state() },
+  }
+  const sessions = { authenticate: value => value === 'fixture', verifyCsrf: value => value === 'csrf' }
+  const headers = { cookie: 'fixture', 'x-chimera-csrf': 'csrf' }
+  const request = (method, body = '') => {
+    const stream = Readable.from([body]); stream.method = method; stream.headers = headers
+    return stream
+  }
+  assert.deepEqual((await handleAntigravityRequest({ pathname: '/api/antigravity/state', request: request('GET'), operatorSessions: sessions, connection })).body, { status: 'state-0' })
+  assert.deepEqual((await handleAntigravityRequest({ pathname: '/api/antigravity/refresh', request: request('POST', '{}'), operatorSessions: sessions, connection })).body, { status: 'state-1' })
+  assert.deepEqual((await handleAntigravityRequest({ pathname: '/api/antigravity/open', request: request('POST', '{}'), operatorSessions: sessions, connection })).body, { status: 'state-2' })
 })

@@ -6,6 +6,8 @@ import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChimeraBrowserRuntime } from '../src/browser/runtime.mjs'
+import { MemoryAuditLog } from '../src/audit-log.mjs'
+import { LocalModelFabricRegistry } from '../src/ceo/local-model-fabric.mjs'
 import { createDeterministicModelRouter } from '../src/ceo/model-router.mjs'
 import { agentManifestFromHermesCandidate } from '../src/agents/registry.mjs'
 
@@ -180,6 +182,139 @@ test('targeting RJ replans its next boundary without leaking guidance to the spe
   assert.equal(turns, 2)
   assert.match(JSON.stringify(calls[1].context.steering), /Only RJ/)
   assert.doesNotMatch(JSON.stringify(calls.find(row => row.context.stage === 'specialist').context.steering), /Only RJ/)
+})
+
+test('guidance and steering revalidate the destination after their durable reservation', async t => {
+  const entered = gate(), releasePlan = gate()
+  let reservationGate = gate()
+  const { runtime } = await fixture(t, async (_prompt, context) => {
+    if (context.stage === 'decompose') { entered.release(); await releasePlan.promise; return plan() }
+    return { summary: 'Done.' }
+  })
+  const task = await runtime.submitTask({ objective: 'Hold a task while its destination changes.' })
+  await entered.promise
+  const initialRevision = runtime.tasks.get(task.taskId).destinationRevision
+  const originalReserve = runtime.tasks.reserveAdmission.bind(runtime.tasks)
+  let heldOperation = null
+  runtime.tasks.reserveAdmission = async input => {
+    const admission = await originalReserve(input)
+    if (input.operation === 'task-message' || input.operation === 'task-steer') {
+      heldOperation = input.operation
+      await reservationGate.promise
+    }
+    return admission
+  }
+  const guidance = runtime.messageTask({ taskId: task.taskId, content: 'Reject stale guidance.', recipientAgentIds: ['ceo'], requestId: 'stale-guidance', expectedDestinationRevision: initialRevision })
+  await waitFor(() => heldOperation, Boolean)
+  await runtime.tasks.reviseDestination(task.taskId)
+  reservationGate.release()
+  await assert.rejects(guidance, { code: 'TASK_DESTINATION_STALE' })
+  assert.equal(runtime.tasks.getAdmission('stale-guidance').status, 'failed')
+  assert.equal(runtime.conversationHistory({ conversationId: `task:${task.taskId}` }).messages.some(message => message.provenance.source === 'operator-task-guidance'), false)
+
+  const currentRevision = runtime.tasks.get(task.taskId).destinationRevision
+  reservationGate = gate()
+  heldOperation = null
+  const steering = runtime.steerTask({ taskId: task.taskId, content: 'Reject stale steering.', requestId: 'stale-steering', expectedDestinationRevision: currentRevision })
+  await waitFor(() => heldOperation === 'task-steer', Boolean)
+  await runtime.tasks.reviseDestination(task.taskId)
+  reservationGate.release()
+  await assert.rejects(steering, { code: 'TASK_DESTINATION_STALE' })
+  assert.equal(runtime.tasks.getAdmission('stale-steering').status, 'failed')
+  assert.deepEqual(runtime.tasks.get(task.taskId).steering ?? [], [])
+  releasePlan.release()
+  await runtime.waitForTask(task.taskId)
+})
+
+test('exact guidance and steering receipts reconcile durable effects without mutating on GET', async t => {
+  const entered = gate(), release = gate()
+  t.after(() => release.release())
+  const { runtime } = await fixture(t, async (_prompt, context) => {
+    if (context.stage === 'decompose') { entered.release(); await release.promise; return plan() }
+    return { summary: 'Reconciled safely.' }
+  })
+  const task = await runtime.submitTask({ objective: 'Hold for exact receipt reconciliation.' })
+  await entered.promise
+  const baseAppend = runtime.audit.append.bind(runtime.audit)
+  let failConversationAudit = true
+  runtime.audit.append = fact => {
+    if (failConversationAudit && fact.kind === 'ceo.conversation.message' && fact.messageKind === 'message') throw Object.assign(new Error('FIXTURE_AUDIT_FAILED'), { code: 'FIXTURE_AUDIT_FAILED' })
+    return baseAppend(fact)
+  }
+  const messageId = 'guidance-audit-reconcile'
+  await assert.rejects(runtime.messageTask({ taskId: task.taskId, requestId: messageId, content: 'Persist this exact guidance.', recipientAgentIds: ['ceo'] }), { code: 'FIXTURE_AUDIT_FAILED' })
+  const before = runtime.conversationHistory({ conversationId: `task:${task.taskId}` }).messages.length
+  const first = runtime.taskAdmissionStatus(messageId)
+  assert.equal(first.status, 'accepted')
+  assert.equal(first.messageId, `human-guidance-${(await import('../src/canonical.mjs')).sha256({ requestId: messageId, taskId: task.taskId, operation: 'task-message' }).slice(0, 48)}`)
+  const repeated = runtime.taskAdmissionStatus(messageId)
+  assert.deepEqual(repeated, first)
+  assert.equal(runtime.conversationHistory({ conversationId: `task:${task.taskId}` }).messages.length, before)
+
+  failConversationAudit = false
+  let failSteerAudit = true
+  runtime.audit.append = fact => {
+    if (failSteerAudit && fact.kind === 'ceo.task.steered') throw Object.assign(new Error('FIXTURE_STEER_AUDIT_FAILED'), { code: 'FIXTURE_STEER_AUDIT_FAILED' })
+    return baseAppend(fact)
+  }
+  const steerId = 'steer-audit-reconcile'
+  await assert.rejects(runtime.steerTask({ taskId: task.taskId, requestId: steerId, content: 'Persist this exact steering.' }), { code: 'FIXTURE_STEER_AUDIT_FAILED' })
+  const steerReceipt = runtime.taskAdmissionStatus(steerId)
+  assert.equal(steerReceipt.status, 'accepted')
+  assert.equal(runtime.taskAdmissionStatus(steerId).status, 'accepted')
+  release.release()
+  await runtime.waitForTask(task.taskId)
+})
+
+test('root producers reconcile exact task effects after post-publish audit failures', async t => {
+  const { runtime } = await fixture(t, async (_prompt, context) => {
+    if (context.stage === 'decompose') return plan()
+    return { summary: 'Fixture terminal result.' }
+  })
+  const baseAppend = runtime.audit.append.bind(runtime.audit)
+  let failSubmissionAudit = true
+  runtime.audit.append = fact => {
+    if (failSubmissionAudit && fact.kind === 'ceo.task.submitted') throw Object.assign(new Error('FIXTURE_SUBMIT_AUDIT_FAILED'), { code: 'FIXTURE_SUBMIT_AUDIT_FAILED' })
+    return baseAppend(fact)
+  }
+
+  const rootRequestId = 'root-producer-audit-failure'
+  await assert.rejects(runtime.submitTask({ requestId: rootRequestId, objective: 'Reconcile the published root task.' }), { code: 'FIXTURE_SUBMIT_AUDIT_FAILED' })
+  const rootReceipt = runtime.taskAdmissionStatus(rootRequestId)
+  assert.equal(rootReceipt.status, 'accepted')
+  assert.equal(rootReceipt.reconciled, true)
+  assert.equal(runtime.tasks.get(rootReceipt.taskId).admissionRequestId, rootRequestId)
+  await runtime.cancelTask({ taskId: rootReceipt.taskId })
+
+  const project = await runtime.registerProject({ mode: 'managed', name: 'Audit reconciliation fixture' })
+  const projectRequestId = 'project-producer-audit-failure'
+  await assert.rejects(runtime.submitProjectTask({ requestId: projectRequestId, projectId: project.projectId, objective: 'Reconcile the published project task.' }), { code: 'FIXTURE_SUBMIT_AUDIT_FAILED' })
+  const projectReceipt = runtime.taskAdmissionStatus(projectRequestId)
+  assert.equal(projectReceipt.status, 'accepted')
+  assert.equal(projectReceipt.reconciled, true)
+  assert.equal(runtime.tasks.get(projectReceipt.taskId).context.projectId, project.projectId)
+  await runtime.cancelTask({ taskId: projectReceipt.taskId })
+
+  const messageRequestId = 'message-producer-audit-failure'
+  await assert.rejects(runtime.sendMessage({ requestId: messageRequestId, content: 'Reconcile the published message task.' }), { code: 'FIXTURE_SUBMIT_AUDIT_FAILED' })
+  const messageReceipt = runtime.taskAdmissionStatus(messageRequestId)
+  assert.equal(messageReceipt.status, 'unknown')
+  assert.equal(messageReceipt.reconciled, undefined)
+  assert.equal(runtime.tasks.get(messageReceipt.taskId).status, 'queued')
+  await runtime.cancelTask({ taskId: messageReceipt.taskId })
+
+  failSubmissionAudit = false
+  const prior = await runtime.tasks.submit({ taskId: 'prior-terminal-for-audit', objective: 'Prior terminal task.', model: null })
+  await runtime.tasks.start(prior.taskId)
+  await runtime.tasks.complete(prior.taskId, { summary: 'Prior terminal evidence.', result: {} })
+  failSubmissionAudit = true
+  const continuationRequestId = 'continuation-producer-audit-failure'
+  await assert.rejects(runtime.continueTask({ requestId: continuationRequestId, taskId: prior.taskId, objective: 'Reconcile the published continuation.' }), { code: 'FIXTURE_SUBMIT_AUDIT_FAILED' })
+  const continuationReceipt = runtime.taskAdmissionStatus(continuationRequestId)
+  assert.equal(continuationReceipt.status, 'accepted')
+  assert.equal(continuationReceipt.reconciled, true)
+  assert.equal(runtime.tasks.get(continuationReceipt.taskId).context.priorTaskId, prior.taskId)
+  await runtime.cancelTask({ taskId: continuationReceipt.taskId })
 })
 
 for (const delayedPost of [false, true]) test(`targeted guidance releases only superseded Ace approval including posting race ${delayedPost}`, { timeout: 10000 }, async t => {
@@ -414,6 +549,17 @@ test('real runtime Ace asks Iris in sandbox, replies with evidence, and RJ synth
   const task = await runtime.submitTask({ objective: 'Collaborate with bounded evidence.' })
   const completed = await runtime.waitForTask(task.taskId)
   assert.equal(completed.status, 'completed', JSON.stringify(completed.failure))
+  const aceResult = completed.result.results.find((result) => result.specialistAgentId === 'ace')
+  const irisResult = completed.result.results.find((result) => result.specialistAgentId === 'iris')
+  assert.ok(aceResult?.assignmentMessageId)
+  assert.ok(aceResult?.resultId)
+  assert.notEqual(aceResult.assignmentMessageId, aceResult.resultId)
+  assert.equal(irisResult.canonicalAssignmentId, aceResult.assignmentMessageId)
+  const aceStep = completed.steps.find((step) => step.nodeId === 'step-1')
+  assert.equal(aceStep.status, 'completed')
+  assert.equal(aceStep.messageId, aceResult.assignmentMessageId)
+  assert.equal(aceStep.resultId, aceResult.resultId)
+  assert.deepEqual(aceStep.history.map((entry) => entry.status), ['running', 'completed'])
   assert.equal(calls.filter(call => call.context.stage === 'specialist-loop').length, 3)
   assert.equal(pinnedCalls, 1)
   const state = await runtime.state()
@@ -421,6 +567,166 @@ test('real runtime Ace asks Iris in sandbox, replies with evidence, and RJ synth
   assert.equal(team.deliveries.length, 4)
   assert.ok(team.deliveries.every(row => ['completed', 'acknowledged'].includes(row.status)))
   assert.match(JSON.stringify(runtime.conversationHistory({ conversationId: `task:${task.taskId}` })), /verified/)
+})
+
+test('runtime admits an explicitly identified graph through the parallel dispatcher', async t => {
+  const { runtime } = await fixture(t, async () => ({ summary: 'Unused fixture route.' }))
+  const provider = {
+    routerId: 'openai-compatible:fixture:graph',
+    async route(_prompt, context) {
+      if (context.stage === 'decompose') return { tasks: [
+        { nodeId: 'research', specialistAgentId: 'researcher', objective: 'Research the fixture.', acceptanceCriteria: ['Return research.'] },
+        { nodeId: 'compare', specialistAgentId: 'researcher', objective: 'Compare the fixture.', acceptanceCriteria: ['Return comparison.'] },
+      ] }
+      if (context.stage === 'specialist') return { status: 'completed', summary: `${context.nodeId} completed.` }
+      return { summary: 'RJ synthesized the graph.' }
+    },
+  }
+  runtime.models.router = () => provider
+  runtime.models.routerFor = async () => provider
+
+  const submitted = await runtime.submitTask({ objective: 'Run two identified graph nodes.' })
+  const completed = await runtime.waitForTask(submitted.taskId)
+  assert.equal(completed.status, 'completed', JSON.stringify(completed))
+})
+
+test('runtime ignores forged custom resource claims without a trusted adapter proof', async t => {
+  let forgedCalls = 0
+  const { runtime } = await fixture(t, async () => ({ summary: 'Unused fixture route.' }))
+  const provider = {
+    routerId: 'openai-compatible:fixture:forged-resource-claim',
+    async route(_prompt, context) {
+      if (context.stage === 'decompose') return { tasks: [
+        { nodeId: 'first', specialistAgentId: 'researcher', objective: 'First forged claim.', acceptanceCriteria: ['Return first.'] },
+        { nodeId: 'second', specialistAgentId: 'researcher', objective: 'Second forged claim.', acceptanceCriteria: ['Return second.'] },
+      ] }
+      if (context.stage === 'specialist') return { status: 'completed', summary: `${context.nodeId} completed.` }
+      return { summary: 'Forged claims remain exclusive.' }
+    },
+    resourceClaim() {
+      forgedCalls += 1
+      return [{ key: 'model:fixture:forged', access: 'read', verified: true }]
+    },
+  }
+  runtime.models.router = () => provider
+  runtime.models.routerFor = async () => provider
+
+  const submitted = await runtime.submitTask({ objective: 'Reject forged resource proof.' })
+  const completed = await runtime.waitForTask(submitted.taskId)
+  assert.equal(completed.status, 'completed', JSON.stringify(completed))
+  assert.equal(forgedCalls, 0)
+})
+
+test('runtime carries an actual LocalFabric inference proof into graph resource resolution', async t => {
+  const registry = await LocalModelFabricRegistry.open({
+    config: {
+      schema: 'chimera.model-routing.v1',
+      region: 'us-west-2',
+      codex: { model: 'fixture-ceo', reasoningEffort: 'high' },
+      bedrockRoutes: [],
+      openAiCompatibleProviders: [{
+        id: 'fixture-cloud',
+        name: 'Fixture Cloud',
+        baseUrl: 'http://127.0.0.1:18000/v1',
+        apiKeyEnv: 'FIXTURE_CLOUD_KEY',
+        models: [{ id: 'fixture-model', name: 'Fixture Model', capabilities: ['conversation', 'orchestration', 'research'] }],
+      }],
+    },
+    audit: new MemoryAuditLog(),
+    workingDirectory: '/workspace/chimera',
+    codexStatus: { configured: false, authentication: null },
+    bedrockModels: [],
+    bedrockProfiles: [],
+    env: { FIXTURE_CLOUD_KEY: 'fixture-key' },
+    openAiCompatibleFetch: async (_url, init) => {
+      const body = JSON.parse(init.body)
+      const prompt = body.messages?.find(message => message.role === 'user')?.content ?? ''
+      const stage = prompt.includes('"stage":"decompose"') ? 'decompose'
+        : prompt.includes('"stage":"specialist"') ? 'specialist' : 'synthesize'
+      const result = stage === 'decompose'
+        ? { tasks: [
+          { nodeId: 'research', specialistAgentId: 'researcher', objective: 'Research the actual fixture.', acceptanceCriteria: ['Return research.'] },
+          { nodeId: 'compare', specialistAgentId: 'researcher', objective: 'Compare the actual fixture.', acceptanceCriteria: ['Return comparison.'] },
+        ] }
+        : stage === 'specialist'
+          ? { status: 'completed', summary: 'Actual LocalFabric specialist result.' }
+          : { summary: 'Actual LocalFabric graph synthesis.' }
+      return { ok: true, status: 200, async text() { return JSON.stringify({ choices: [{ message: { content: JSON.stringify(result) } }] }) } }
+    },
+  })
+  await registry.select({ providerId: 'fixture-cloud', model: 'fixture-model' })
+  const trustedRouter = await registry.routerFor({ mode: 'pinned', providerId: 'fixture-cloud', model: 'fixture-model' })
+  assert.deepEqual(trustedRouter.resourceClaim({
+    requirements: { capabilities: ['research'] },
+    context: { stage: 'specialist', taskId: 'actual-fabric-proof' },
+  }), [{ key: 'model:fixture-cloud:fixture-model', access: 'read', verified: true }])
+  const { runtime } = await fixture(t, async () => ({ summary: 'Unused fixture route.' }), { modelRegistry: registry })
+
+  const submitted = await runtime.submitTask({ objective: 'Use the actual LocalFabric graph route.' })
+  const completed = await runtime.waitForTask(submitted.taskId)
+  assert.equal(completed.status, 'completed', JSON.stringify(completed))
+})
+
+test('imported harness graph nodes remain exclusive beside an unproven custom route', async t => {
+  const researchEntered = gate()
+  const researchRelease = gate()
+  const harnessEntered = gate()
+  let harnessRuns = 0
+  const { runtime } = await fixture(t, async () => ({ summary: 'Unused fixture route.' }), {
+    agentReferenceProvider: {
+      async materialize(_reference, { kind }) {
+        if (kind === 'persona') return [{ path: 'SOUL.md', content: 'Fixture harness.' }]
+        if (kind === 'memory') return [{ path: 'MEMORY.md', content: 'Fixture memory.' }]
+        return [{ path: 'SKILL.md', content: 'Fixture skill.' }]
+      },
+    },
+  })
+  const provider = {
+    routerId: 'openai-compatible:fixture:harness',
+    async route(_prompt, context) {
+      if (context.stage === 'decompose') return { tasks: [
+        { nodeId: 'research', specialistAgentId: 'researcher', objective: 'Research the proven route.', acceptanceCriteria: ['Return research.'] },
+        { nodeId: 'z-harness', specialistAgentId: 'ace', objective: 'Run the imported harness.', acceptanceCriteria: ['Return harness evidence.'] },
+      ] }
+      if (context.stage === 'specialist') {
+        researchEntered.release()
+        await researchRelease.promise
+        return { status: 'completed', summary: 'Proven inference completed.' }
+      }
+      if (context.stage === 'specialist-loop') {
+        harnessRuns += 1
+        harnessEntered.release()
+        return { status: 'completed', summary: 'Imported harness completed.' }
+      }
+      return { summary: 'Harness graph synthesized.' }
+    },
+  }
+  runtime.models.router = () => provider
+  runtime.models.routerFor = async () => provider
+  await runtime.agentRegistry.registerMany([agentManifestFromHermesCandidate({
+    schema: 'chimera.hermes-agent-candidate.v1',
+    candidateId: 'fixture:ace', profileId: 'ace', displayName: 'Ace', sourceRef: 'hermes://fixture/profiles/ace',
+  })])
+
+  t.after(() => researchRelease.release())
+  const submitted = await runtime.submitTask({ objective: 'Keep imported harness work exclusive.' })
+  let entryTimeout
+  try {
+    await Promise.race([
+      researchEntered.promise,
+      new Promise((_, reject) => {
+        entryTimeout = setTimeout(() => reject(new Error(`research node did not enter: ${JSON.stringify(runtime.tasks.get(submitted.taskId))}`)), 3000)
+      }),
+    ])
+  } finally {
+    clearTimeout(entryTimeout)
+  }
+  assert.equal(harnessRuns, 0)
+  researchRelease.release()
+  await harnessEntered.promise
+  const completed = await runtime.waitForTask(submitted.taskId)
+  assert.equal(completed.status, 'completed', JSON.stringify(completed))
+  assert.equal(harnessRuns, 1)
 })
 
 test('cancelled delayed peer model cannot dispatch its proposed filesystem tool', async t => {
@@ -669,12 +975,33 @@ test('cancelling a pending worker approval denies the action and stops future mo
     displayName: 'Ace', sourceRef: 'hermes://fixture/profiles/ace',
   })])
   const task = await runtime.submitTask({ objective: 'Write the bounded artifact.' })
-  const decision = await waitFor(() => runtime.decisions.pending()[0], Boolean)
+  const waitingStep = await waitFor(
+    () => runtime.tasks.get(task.taskId)?.steps?.find((step) => step.nodeId === 'step-1'),
+    (step) => step?.status === 'waiting-for-approval',
+  )
+  const decision = await waitFor(
+    () => runtime.decisions.pending().find((candidate) => candidate.taskId === task.taskId
+      && candidate.nodeId === waitingStep.nodeId
+      && candidate.canonicalAssignmentId === waitingStep.messageId),
+    Boolean,
+  )
   assert.equal((await runtime.state()).agents.main.status, 'Waiting')
   assert.equal(runtime.tasks.get(task.taskId).checkpoint.effectOutcome, 'unknown')
+  assert.equal(waitingStep.status, 'waiting-for-approval')
+  assert.match(waitingStep.messageId, /^handoff-/)
+  assert.equal(waitingStep.resultId, null)
+  assert.equal(waitingStep.history.at(-1).status, 'waiting-for-approval')
+  assert.equal(decision.taskId, task.taskId)
+  assert.equal(decision.nodeId, 'step-1')
+  assert.equal(decision.assignmentId, waitingStep.messageId)
+  assert.equal(decision.canonicalAssignmentId, waitingStep.messageId)
   await runtime.cancelTask({ taskId: task.taskId })
   const terminal = await runtime.waitForTask(task.taskId)
   assert.equal(terminal.status, 'cancelled')
+  const cancelledStep = terminal.steps.find((step) => step.nodeId === 'step-1')
+  assert.equal(cancelledStep.status, 'cancelled')
+  assert.equal(cancelledStep.messageId, waitingStep.messageId)
+  assert.equal(cancelledStep.resultId, null)
   assert.equal(runtime.decisions.get(decision.actionId).status, 'cancelled')
   assert.equal((await runtime.decide(decision.actionId, 'approve')).status, 'denied')
   assert.equal(executed, 0)

@@ -3,7 +3,9 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 
 export const AGENT_MANIFEST_SCHEMA = 'chimera.agent-manifest.v1'
+export const AGENT_NATIVE_MANIFEST_SCHEMA = 'chimera.agent-manifest.v2'
 export const AGENT_REGISTRY_SCHEMA = 'chimera.agent-registry.v1'
+export const NATIVE_RESERVED_AGENT_IDS = Object.freeze(['ceo', 'operator', 'rj', 'researcher'])
 
 const AGENT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
 const CAPABILITY = /^[a-z0-9][a-z0-9-]{0,63}$/
@@ -45,19 +47,13 @@ function normalizeCapabilities(value) {
 
 export function validateAgentManifest(value) {
   if (!isRecord(value)
-    || value.schema !== AGENT_MANIFEST_SCHEMA
+    || ![AGENT_MANIFEST_SCHEMA, AGENT_NATIVE_MANIFEST_SCHEMA].includes(value.schema)
     || !boundedString(value.agentId, 64)
     || !AGENT_ID.test(value.agentId)
-    || ['ceo', 'operator'].includes(value.agentId)
     || !boundedString(value.displayName, 128)
     || !boundedString(value.role, 512)
     || value.enabled !== true
     || value.modelPreference?.mode !== 'chimera-auto'
-    || value.source?.type !== 'hermes'
-    || !boundedString(value.source?.sourceId, 64)
-    || !boundedString(value.source?.profileId, 64)
-    || value.source.profileId !== value.agentId
-    || !AGENT_ID.test(value.source.profileId)
     || value.execution?.adapter !== 'model-fabric'
     || value.execution?.isolation !== 'per-agent-workspace'
     || value.execution?.sideEffects !== 'dsh-required'
@@ -65,8 +61,21 @@ export function validateAgentManifest(value) {
     || Number.isNaN(Date.parse(value.importedAt))) {
     throw new TypeError('AGENT_MANIFEST_INVALID')
   }
-  const ref = safeHermesRef(value.source.ref, value.agentId)
   const capabilities = normalizeCapabilities(value.capabilities)
+  if (value.schema === AGENT_NATIVE_MANIFEST_SCHEMA) return validateNativeManifest(value, capabilities)
+  return validateHermesManifest(value, capabilities)
+}
+
+function validateHermesManifest(value, capabilities) {
+  if (['ceo', 'operator'].includes(value.agentId)
+    || value.source?.type !== 'hermes'
+    || !boundedString(value.source?.sourceId, 64)
+    || !boundedString(value.source?.profileId, 64)
+    || value.source.profileId !== value.agentId
+    || !AGENT_ID.test(value.source.profileId)) {
+    throw new TypeError('AGENT_MANIFEST_INVALID')
+  }
+  const ref = safeHermesRef(value.source.ref, value.agentId)
   const expectedMemoryRef = `${ref}/memory`
   const expectedSkillRef = `${ref}/skills`
   const expectedPersonaRef = `${ref}/persona`
@@ -114,6 +123,76 @@ export function validateAgentManifest(value) {
   }))
 }
 
+function validateNativeManifest(value, capabilities) {
+  if (NATIVE_RESERVED_AGENT_IDS.includes(value.agentId)
+    || value.source?.type !== 'chimera'
+    || value.source?.sourceId !== 'local'
+    || value.source?.ref !== `chimera://local/agents/${value.agentId}`) {
+    throw new TypeError('AGENT_MANIFEST_INVALID')
+  }
+  const ref = value.source.ref
+  const expectedRefs = {
+    persona: `${ref}/persona`,
+    memory: `${ref}/memory`,
+    skills: `${ref}/skills`,
+  }
+  for (const [kind, expected] of Object.entries(expectedRefs)) {
+    const key = `${kind === 'persona' ? 'persona' : kind === 'memory' ? 'memory' : 'skill'}Refs`
+    if (!Array.isArray(value[key])
+      || value[key].length !== 1
+      || value[key][0]?.type !== 'chimera-profile'
+      || value[key][0]?.ref !== expected) {
+      throw new TypeError(`AGENT_${kind.toUpperCase()}_REFS_INVALID`)
+    }
+  }
+  return Object.freeze(structuredClone({
+    schema: AGENT_NATIVE_MANIFEST_SCHEMA,
+    agentId: value.agentId,
+    displayName: value.displayName,
+    role: value.role,
+    capabilities,
+    modelPreference: { mode: 'chimera-auto' },
+    source: { type: 'chimera', sourceId: 'local', ref },
+    personaRefs: [{ type: 'chimera-profile', ref: expectedRefs.persona }],
+    memoryRefs: [{ type: 'chimera-profile', ref: expectedRefs.memory }],
+    skillRefs: [{ type: 'chimera-profile', ref: expectedRefs.skills }],
+    execution: {
+      adapter: 'model-fabric',
+      isolation: 'per-agent-workspace',
+      sideEffects: 'dsh-required',
+    },
+    enabled: true,
+    importedAt: new Date(value.importedAt).toISOString(),
+  }))
+}
+
+export function agentManifestFromNativeInput(input, { now = () => Date.now() } = {}) {
+  if (!isRecord(input)) throw new TypeError('NATIVE_AGENT_INPUT_INVALID')
+  return validateAgentManifest({
+    schema: AGENT_NATIVE_MANIFEST_SCHEMA,
+    agentId: input.agentId,
+    displayName: input.displayName,
+    role: input.role,
+    capabilities: input.capabilities,
+    modelPreference: { mode: 'chimera-auto' },
+    source: {
+      type: 'chimera',
+      sourceId: 'local',
+      ref: `chimera://local/agents/${input.agentId}`,
+    },
+    personaRefs: [{ type: 'chimera-profile', ref: `chimera://local/agents/${input.agentId}/persona` }],
+    memoryRefs: [{ type: 'chimera-profile', ref: `chimera://local/agents/${input.agentId}/memory` }],
+    skillRefs: [{ type: 'chimera-profile', ref: `chimera://local/agents/${input.agentId}/skills` }],
+    execution: {
+      adapter: 'model-fabric',
+      isolation: 'per-agent-workspace',
+      sideEffects: 'dsh-required',
+    },
+    enabled: true,
+    importedAt: new Date(now()).toISOString(),
+  })
+}
+
 export function agentManifestFromHermesCandidate(candidate, overrides = {}, { now = () => Date.now() } = {}) {
   if (!isRecord(candidate)
     || candidate.schema !== 'chimera.hermes-agent-candidate.v1'
@@ -126,10 +205,12 @@ export function agentManifestFromHermesCandidate(candidate, overrides = {}, { no
   const sourceId = candidate.candidateId.slice(0, candidate.candidateId.lastIndexOf(':'))
   if (!boundedString(sourceId, 64)) throw new TypeError('HERMES_AGENT_CANDIDATE_INVALID')
   const ref = safeHermesRef(candidate.sourceRef, candidate.profileId)
+  const displayName = overrides.displayName ?? candidate.displayName
+  if (!boundedString(displayName, 128)) throw new TypeError('AGENT_DISPLAY_NAME_INVALID')
   return validateAgentManifest({
     schema: AGENT_MANIFEST_SCHEMA,
     agentId: candidate.profileId,
-    displayName: candidate.displayName,
+    displayName,
     role: overrides.role ?? candidate.defaultRole ?? 'General specialist',
     capabilities: overrides.capabilities ?? candidate.defaultCapabilities ?? ['general'],
     modelPreference: { mode: 'chimera-auto' },
@@ -154,7 +235,7 @@ export function agentManifestFromHermesCandidate(candidate, overrides = {}, { no
 
 export class DurableAgentRegistry {
   #agents = new Map()
-  #writes = Promise.resolve()
+  #mutations = Promise.resolve()
 
   constructor({ filePath, audit, now = () => Date.now() }) {
     if (!boundedString(filePath, 4096) || !audit || typeof audit.append !== 'function') {
@@ -201,80 +282,113 @@ export class DurableAgentRegistry {
     if (!Array.isArray(values) || values.length === 0 || values.length > 16) {
       throw new TypeError('AGENT_IMPORT_BATCH_INVALID')
     }
-    const manifests = values.map(validateAgentManifest)
-    if (new Set(manifests.map((manifest) => manifest.agentId)).size !== manifests.length
-      || manifests.some((manifest) => this.#agents.has(manifest.agentId))) {
-      const error = new Error('AGENT_ALREADY_REGISTERED')
-      error.code = 'AGENT_ALREADY_REGISTERED'
-      throw error
-    }
-    const previous = new Map(this.#agents)
-    for (const manifest of manifests) this.#agents.set(manifest.agentId, manifest)
-    try {
-      await this.#persist()
-    } catch (error) {
-      this.#agents = previous
-      throw error
-    }
-    for (const manifest of manifests) {
-      this.audit.append({
-        kind: 'agent.registry.registered',
-        agentId: manifest.agentId,
-        sourceType: manifest.source.type,
-        sourceId: manifest.source.sourceId,
-        sourceRef: manifest.source.ref,
-        at: new Date(this.now()).toISOString(),
-      })
-    }
-    return structuredClone(manifests)
+    return this.#mutate(async () => {
+      const manifests = values.map(validateAgentManifest)
+      if (new Set(manifests.map((manifest) => manifest.agentId)).size !== manifests.length
+        || manifests.some((manifest) => this.#agents.has(manifest.agentId))) {
+        const error = new Error('AGENT_ALREADY_REGISTERED')
+        error.code = 'AGENT_ALREADY_REGISTERED'
+        throw error
+      }
+      const next = new Map(this.#agents)
+      for (const manifest of manifests) next.set(manifest.agentId, manifest)
+      for (const manifest of manifests) {
+        await this.audit.append({
+          kind: 'agent.registry.registered',
+          agentId: manifest.agentId,
+          sourceType: manifest.source.type,
+          sourceId: manifest.source.sourceId,
+          sourceRef: manifest.source.ref,
+          at: new Date(this.now()).toISOString(),
+        })
+      }
+      await this.#persist(next)
+      this.#agents = next
+      return structuredClone(manifests)
+    })
   }
 
   async unregister(agentId, { removedBy, reason = 'operator-request' } = {}) {
     if (typeof agentId !== 'string' || !AGENT_ID.test(agentId)) throw new TypeError('AGENT_ID_INVALID')
     if (!boundedString(removedBy, 128)) throw new TypeError('AGENT_REMOVAL_ACTOR_INVALID')
     if (!boundedString(reason, 256)) throw new TypeError('AGENT_REMOVAL_REASON_INVALID')
-    const previous = this.#agents.get(agentId)
-    if (!previous) {
-      const error = new Error('AGENT_NOT_REGISTERED')
-      error.code = 'AGENT_NOT_REGISTERED'
-      throw error
-    }
-    this.#agents.delete(agentId)
-    try {
-      await this.#persist()
-    } catch (error) {
-      this.#agents.set(agentId, previous)
-      throw error
-    }
-    this.audit.append({
-      kind: 'agent.registry.unregistered',
-      agentId,
-      displayName: previous.displayName,
-      sourceType: previous.source.type,
-      sourceId: previous.source.sourceId,
-      sourceRef: previous.source.ref,
-      removedBy,
-      reason,
-      at: new Date(this.now()).toISOString(),
+    return this.#mutate(async () => {
+      const previous = this.#agents.get(agentId)
+      if (!previous) {
+        const error = new Error('AGENT_NOT_REGISTERED')
+        error.code = 'AGENT_NOT_REGISTERED'
+        throw error
+      }
+      const next = new Map(this.#agents)
+      next.delete(agentId)
+      await this.audit.append({
+        kind: 'agent.registry.unregistered',
+        agentId,
+        displayName: previous.displayName,
+        sourceType: previous.source.type,
+        sourceId: previous.source.sourceId,
+        sourceRef: previous.source.ref,
+        removedBy,
+        reason,
+        at: new Date(this.now()).toISOString(),
+      })
+      await this.#persist(next)
+      this.#agents = next
+      return structuredClone(previous)
     })
-    return structuredClone(previous)
   }
 
-  async #persist() {
+  async updateMetadata(agentId, { displayName, role, capabilities } = {}, { changedBy } = {}) {
+    if (typeof agentId !== 'string' || !AGENT_ID.test(agentId)) throw new TypeError('AGENT_ID_INVALID')
+    if (!boundedString(changedBy, 128)) throw new TypeError('AGENT_METADATA_ACTOR_INVALID')
+    return this.#mutate(async () => {
+      const previous = this.#agents.get(agentId)
+      if (!previous) {
+        const error = new Error('AGENT_NOT_REGISTERED')
+        error.code = 'AGENT_NOT_REGISTERED'
+        throw error
+      }
+      const next = validateAgentManifest({
+        ...previous,
+        displayName,
+        role,
+        capabilities,
+      })
+      const changedFields = ['capabilities', 'displayName', 'role']
+        .filter((field) => JSON.stringify(previous[field]) !== JSON.stringify(next[field]))
+        .sort()
+      const nextAgents = new Map(this.#agents)
+      nextAgents.set(agentId, next)
+      await this.audit.append({
+        kind: 'agent.registry.metadata-updated',
+        agentId,
+        changedBy,
+        changedFields,
+        at: new Date(this.now()).toISOString(),
+      })
+      await this.#persist(nextAgents)
+      this.#agents = nextAgents
+      return structuredClone(next)
+    })
+  }
+
+  async #persist(agents = this.#agents) {
     const document = {
       schema: AGENT_REGISTRY_SCHEMA,
-      agents: [...this.#agents.values()],
+      agents: [...agents.values()],
     }
-    const operation = this.#writes.then(async () => {
-      const temporary = `${this.filePath}.${crypto.randomUUID()}.tmp`
-      try {
-        await writeFile(temporary, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 })
-        await rename(temporary, this.filePath)
-      } finally {
-        await rm(temporary, { force: true })
-      }
-    })
-    this.#writes = operation.then(() => undefined, () => undefined)
-    return operation
+    const temporary = `${this.filePath}.${crypto.randomUUID()}.tmp`
+    try {
+      await writeFile(temporary, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 })
+      await rename(temporary, this.filePath)
+    } finally {
+      await rm(temporary, { force: true })
+    }
+  }
+
+  #mutate(operation) {
+    const run = this.#mutations.then(operation)
+    this.#mutations = run.then(() => undefined, () => undefined)
+    return run
   }
 }
