@@ -48,6 +48,8 @@ supports Darwin and Linux; other platforms are not a tested parity target.
 Install the following before starting:
 
 - Node.js 22.19.0 or newer, with npm.
+- Python 3.9 or newer at `/usr/bin/python3`. Worker filesystem operations use
+  its POSIX descriptor-relative APIs and fail closed if this broker is unavailable.
 - Git, when using the Projects workspace with a repository.
 - Playwright Chromium, installed for the current user with the command below.
 - Playwright Firefox as well when running the complete test suite; the client
@@ -132,7 +134,7 @@ Run the readiness check before starting work:
 npm run pilot:check
 ```
 
-It verifies Node, loopback binding, Chromium, `.env` permissions when a file is
+It verifies Node, the POSIX Python broker, loopback binding, Chromium, `.env` permissions when a file is
 present, and Codex CLI availability. A missing optional AWS account is not a
 startup failure. Fix any `BLOCK` line before continuing.
 
@@ -200,11 +202,24 @@ The beta is intentionally limited:
 - Human-only sign-in, MFA, CAPTCHA, payment, enrollment, and judgment remain
   human actions. A browser control lease does not grant a model permission to
   use an account.
+- Managed Chromium uses an authenticated, DNS-pinning public-egress proxy.
+  Private and special-use destinations are blocked, including redirects and
+  subresources. Only exact, short-lived sign-in callback URLs are exempt;
+  private-site browsing is not supported. Service workers, QUIC, and direct
+  WebRTC UDP are disabled to preserve that transport boundary.
 - AWS AgentCore, cloud audit, media storage, external model access, and remote
   team connectors need separately configured infrastructure and acceptance.
   Project-scoped isolation and production key custody are not complete here.
 - The checked-in test suite uses fixtures and keyless paths. It does not prove
   live provider output, account authorization, cloud durability, or billing.
+- Worker roots, their ancestors, and staging areas are runtime-owned. Only
+  scratch descendants are agent-writable. Do not share those roots with
+  untrusted host processes; descriptor-relative operations protect against
+  descendant symlink swaps, not a compromised operator account or runtime.
+- Confirm-tier tool previews are bounded: shell commands, file contents/change
+  text, GitHub bodies, and generic argument previews must fit 4 KiB; larger calls require splitting or a dedicated review
+  adapter. Known credential fields are redacted, but arbitrary prose can still
+  contain secrets: do not embed credentials in commands or tool arguments.
 
 ## Backup and upgrade
 

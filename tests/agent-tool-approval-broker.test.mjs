@@ -8,6 +8,15 @@ import { DurableDecisionQueue, HumanDecisionHandler } from '../src/ceo/decisions
 import { signDecision, generateIdentity } from '../src/identity.mjs'
 import { WorkerToolApprovalBroker } from '../src/agents/tool-approval-broker.mjs'
 
+const writeReview = { schema: 'chimera.approval-review.v1', summary: 'Write a test file', fields: { Path: 'scratch/test.txt', 'Content bytes': 4 } }
+
+test('missing semantic review cannot create an approvable decision', async () => {
+  const broker = new WorkerToolApprovalBroker({ queue: { post: () => assert.fail('must not enqueue') }, audit: new MemoryAuditLog() })
+  await assert.rejects(broker.request({ actionId: 'action', challengeHash: 'a'.repeat(64), agentId: 'ace', grantId: 'grant',
+    toolName: 'write', capability: 'filesystem.write', resource: 'dsh-tool:write', callId: 'call', requestHash: 'b'.repeat(64),
+  }), /WORKER_APPROVAL_REVIEW_INVALID/)
+})
+
 test('a confirm-tier worker tool pauses on the durable Decisions queue and receives only a signed outcome', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'chimera-worker-approval-'))
   const audit = new MemoryAuditLog()
@@ -20,6 +29,7 @@ test('a confirm-tier worker tool pauses on the durable Decisions queue and recei
       actionId: 'dsh-worker-write-1', challengeHash: 'a'.repeat(64), agentId: 'ace', grantId: 'ace-grant',
       sessionId: 'worker-ace', callId: 'call-1', rootCallId: 'call-1', parentCallId: null,
       toolName: 'write', capability: 'filesystem.write', resource: 'dsh-tool:write', requestHash: 'b'.repeat(64),
+      review: writeReview,
     }
     const waiting = broker.request(request)
     for (let attempt = 0; attempt < 20 && !queue.get(request.actionId); attempt += 1) {
@@ -27,7 +37,7 @@ test('a confirm-tier worker tool pauses on the durable Decisions queue and recei
     }
     assert.deepEqual(pending, ['dsh-worker-write-1'])
     assert.equal(queue.get('dsh-worker-write-1').title, 'Ace wants to use write')
-    assert.deepEqual(queue.get('dsh-worker-write-1').actionDiff, { tool: 'write', callId: 'call-1', requestHash: 'b'.repeat(64) })
+    assert.deepEqual(queue.get('dsh-worker-write-1').actionDiff, { tool: 'write', callId: 'call-1', requestHash: 'b'.repeat(64), review: writeReview })
 
     const human = generateIdentity('operator')
     const signed = signDecision({
@@ -89,6 +99,7 @@ test('worker approval returns the actual DSH outcome instead of a premature allo
     const request = {
       actionId: 'dsh-worker-write-result', challengeHash: 'c'.repeat(64), agentId: 'ace', grantId: 'ace-grant',
       callId: 'call-result', toolName: 'write', capability: 'filesystem.write', resource: 'dsh-tool:write', requestHash: 'd'.repeat(64),
+      review: writeReview,
     }
     const waiting = broker.request(request)
     while (!queue.get(request.actionId)) await new Promise((resolve) => setTimeout(resolve, 1))
@@ -120,6 +131,7 @@ test('expired worker approval becomes terminal and releases the waiting tool wit
     const request = {
       actionId: 'dsh-worker-write-expired', challengeHash: 'e'.repeat(64), agentId: 'ace', grantId: 'ace-grant',
       callId: 'call-expired', toolName: 'write', capability: 'filesystem.write', resource: 'dsh-tool:write', requestHash: 'f'.repeat(64),
+      review: writeReview,
     }
     const waiting = broker.request(request)
     while (!queue.get(request.actionId)) await new Promise((resolve) => setTimeout(resolve, 1))
@@ -179,6 +191,7 @@ test('runtime shutdown cancels every waiting worker approval and releases its to
       resource: 'dsh-tool:write',
       callId: 'call-shutdown',
       requestHash: 'd'.repeat(64),
+      review: writeReview,
     })
     while (!queue.get('dsh-shutdown')) await new Promise((resolve) => setTimeout(resolve, 1))
     assert.deepEqual(await broker.cancelAll('PROCESS_STOPPED'), ['dsh-shutdown'])

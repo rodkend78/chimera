@@ -37,6 +37,7 @@ export function evaluatePilotReadiness({
   nodeVersion,
   host,
   chromiumAvailable,
+  filesystemBrokerAvailable,
   envFile,
   modelAccess,
 }) {
@@ -53,6 +54,9 @@ export function evaluatePilotReadiness({
   const localBind = LOOPBACK_HOSTS.has(host)
   const safeEnvFile = envFile?.exists !== true || ((envFile.mode ?? 0) & 0o077) === 0
   const checks = [
+    check('filesystem-broker', filesystemBrokerAvailable === true,
+      filesystemBrokerAvailable ? 'POSIX filesystem broker is available.' : 'POSIX filesystem broker is unavailable.',
+      'Install Python 3.9 or newer at /usr/bin/python3 on macOS or Linux.'),
     check(
       'node',
       supportedNode,
@@ -153,9 +157,19 @@ export async function inspectPilotReadiness({
     nodeVersion,
     host: env.CHIMERA_HOST ?? '127.0.0.1',
     chromiumAvailable: await inspectChromium(),
+    filesystemBrokerAvailable: await inspectFilesystemBroker(),
     envFile: await inspectEnvFile(join(root, '.env')),
     modelAccess: { codex, bedrock },
   })
+}
+
+export async function inspectFilesystemBroker({ execFileImpl = execFile } = {}) {
+  try {
+    await execFileImpl('/usr/bin/python3', ['-I', '-B', '-c',
+      'import os,sys; assert sys.version_info >= (3,9); assert os.open in os.supports_dir_fd; assert os.rename in os.supports_dir_fd; assert os.scandir in os.supports_fd; assert os.O_NOFOLLOW and os.O_DIRECTORY'],
+    { timeout: 5000, maxBuffer: 4096 })
+    return true
+  } catch { return false }
 }
 
 export function formatPilotReadiness(result) {

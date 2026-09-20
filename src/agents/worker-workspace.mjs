@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
-import { chmod, lstat, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, resolve, sep } from 'node:path'
+import { chmod, mkdir, rename, writeFile } from 'node:fs/promises'
+import { basename, dirname, resolve, sep } from 'node:path'
+import { workspaceFilesystem } from './workspace-filesystem.mjs'
 
 const ENTRY_PATH = /^(?!\.)(?!.*(?:^|\/)\.)(?!.*\.\.)(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*[A-Za-z0-9][A-Za-z0-9._-]*$/
 const MAX_FILES = 512
@@ -54,17 +55,10 @@ async function materializeMount({ destination, entries }) {
 
 async function removeOwnedTree(path) {
   try {
-    const info = await lstat(path)
-    if (info.isDirectory()) {
-      await chmod(path, 0o700)
-      for (const entry of await readdir(path)) await removeOwnedTree(resolve(path, entry))
-    } else {
-      await chmod(path, 0o600)
-    }
+    await workspaceFilesystem({ path: dirname(path) }, { operation: 'cleanup', path: basename(path) })
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error
   }
-  await rm(path, { recursive: true, force: true })
 }
 
 export async function removeAgentWorkerWorkspace({ rootDir, agentId } = {}) {

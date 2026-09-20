@@ -172,8 +172,58 @@ test('every consequential GitHub tool has a bounded semantic approval projection
 
   assert.deepEqual(projections.map((review) => review.schema), Array(4).fill('chimera.approval-review.v1'))
   assert.deepEqual(projections.map((review) => review.fields.Repository), Array(4).fill(repository))
-  assert.equal(JSON.stringify(projections).includes('Evidence'), false)
-  assert.equal(JSON.stringify(projections).includes('CI is green.'), false)
+  assert.equal(projections[0].fields.Body, 'Evidence')
+  assert.equal(projections[2].fields.Comment, 'CI is green.')
+})
+
+test('shell, filesystem, network and MCP approvals expose bounded redacted semantics', () => {
+  const shell = approvalReviewForTool('bash', { command: 'printf hello', timeoutMs: 1000 })
+  assert.equal(shell?.fields.Command, 'printf hello')
+  assert.match(shell.fields['Working directory'], /scratch/)
+  const write = approvalReviewForTool('write', { path: 'scratch/result', content: 'private content' })
+  assert.equal(write?.fields.Path, 'scratch/result')
+  assert.equal(write.fields['Content bytes'], 15)
+  assert.equal(write.fields.Content, 'private content')
+  const edit = approvalReviewForTool('edit', { path: 'scratch/result', oldText: 'old', newText: 'new' })
+  assert.equal(edit.fields['Old text'], 'old')
+  assert.equal(edit.fields['New text'], 'new')
+  assert.equal(JSON.stringify(approvalReviewForTool('write', { path: 'scratch/result', content: 'token=never-display-this' })).includes('never-display-this'), false)
+  assert.throws(() => approvalReviewForTool('write', { path: 'scratch/result', content: 'x'.repeat(4097) }), /DSH_APPROVAL_REVIEW_INVALID/)
+  const network = approvalReviewForTool('web_fetch', { url: 'https://example.com/docs' })
+  assert.match(JSON.stringify(network), /example.com\/docs/)
+  const mcp = approvalReviewForTool('mcp__fixture__mutate', { target: 'record-7', token: 'never-display-this' })
+  assert.match(JSON.stringify(mcp), /record-7/)
+  assert.equal(JSON.stringify(mcp).includes('never-display-this'), false)
+  assert.throws(() => approvalReviewForTool('bash', { command: 'x'.repeat(5000) }), /DSH_APPROVAL_REVIEW_INVALID/)
+})
+
+test('a JSON prototype-named argument remains visible in an MCP approval', () => {
+  const args = JSON.parse('{"__proto__":{"operation":"delete","target":"record-7"},"visible":"ok"}')
+  const review = approvalReviewForTool('mcp__fixture__mutate', args)
+  assert.equal(JSON.parse(review.fields.Arguments).__proto__.operation, 'delete')
+  assert.match(review.fields.Arguments, /record-7/)
+})
+
+test('confirm review and execution use an immutable snapshot of the original arguments', async () => {
+  let exec
+  const f = await fixture({ tier: 'confirm', approvalBroker: { async request(request) {
+    assert.equal(request.review.fields.Command, 'printf safe')
+    assert.throws(() => { exec.arguments.command = 'printf unsafe' }, TypeError)
+    return signDecision({ actionId: request.actionId, challengeHash: request.challengeHash,
+      outcome: 'approve', ...window }, f.human)
+  } } })
+  exec = execution({ arguments: { command: 'printf safe' } })
+  assert.equal((await f.adapter.preExecute(exec)).kind, 'allow')
+  assert.equal(exec.arguments.command, 'printf safe')
+})
+
+test('an invalid confirm preview terminalizes the gateway action rather than leaving it pending', async () => {
+  const f = await fixture({ tier: 'confirm', approvalBroker: { request() { assert.fail('must not enqueue') } } })
+  assert.deepEqual(await f.adapter.preExecute(execution({ arguments: { command: 'x'.repeat(5000) } })),
+    { kind: 'deny', reason: 'DSH_APPROVAL_REVIEW_INVALID' })
+  const pending = f.audit.entries().map(entry => entry.fact).find(entry => entry.kind === 'action.pending')
+  assert.ok(pending)
+  assert.equal(f.gateway.cancelPending(pending.actionId).reason, 'NO_PENDING_ACTION')
 })
 
 test('the upstream catalog parser reads unique tool headings in stable order', () => {

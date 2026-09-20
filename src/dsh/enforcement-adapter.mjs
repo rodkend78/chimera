@@ -1,5 +1,6 @@
 import { sha256 } from '../canonical.mjs'
 import { signAction } from '../identity.mjs'
+import { redactSensitiveData, redactSensitiveText } from '../security/redaction.mjs'
 
 function isBoundedString(value, maximum = 2048) {
   return typeof value === 'string' && value.length > 0 && value.length <= maximum
@@ -28,15 +29,22 @@ function validPullNumber(value) {
 }
 
 function githubReview(summary, fields) {
-  return {
+  const review = {
     schema: 'chimera.approval-review.v1',
     summary,
     fields,
   }
+  if (utf8Bytes(JSON.stringify(review)) > 8 * 1024) throw new TypeError('DSH_APPROVAL_REVIEW_INVALID')
+  return review
+}
+
+function previewText(value) {
+  if (typeof value !== 'string' || utf8Bytes(value) > 4096) throw new TypeError('DSH_APPROVAL_REVIEW_INVALID')
+  return redactSensitiveText(value) || '(empty)'
 }
 
 export function approvalReviewForTool(toolName, args) {
-  if (!GITHUB_WRITE_TOOLS.has(toolName)) return null
+  if (!GITHUB_WRITE_TOOLS.has(toolName)) return genericReview(toolName, args)
   if (!args || typeof args !== 'object' || Array.isArray(args) || !validRepository(args.repository)) {
     throw new TypeError('DSH_APPROVAL_REVIEW_INVALID')
   }
@@ -64,6 +72,7 @@ export function approvalReviewForTool(toolName, args) {
       Title: args.title,
       'Head branch': args.head,
       'Base branch': args.base,
+      Body: previewText(body),
       'Body bytes': utf8Bytes(body),
       'Body SHA-256': sha256({ body }),
     })
@@ -82,7 +91,7 @@ export function approvalReviewForTool(toolName, args) {
       Changes: [args.title !== undefined ? 'title' : null, args.body !== undefined ? 'body' : null, args.state !== undefined ? 'state' : null].filter(Boolean).join(', '),
       ...(args.title !== undefined ? { Title: args.title } : {}),
       ...(args.state !== undefined ? { State: args.state } : {}),
-      ...(args.body !== undefined ? { 'Body bytes': utf8Bytes(args.body), 'Body SHA-256': sha256({ body: args.body }) } : {}),
+      ...(args.body !== undefined ? { Body: previewText(args.body), 'Body bytes': utf8Bytes(args.body), 'Body SHA-256': sha256({ body: args.body }) } : {}),
     }
     return githubReview(`Update PR #${args.number} in ${args.repository}`, fields)
   }
@@ -92,9 +101,68 @@ export function approvalReviewForTool(toolName, args) {
   return githubReview(`Comment on PR #${args.number} in ${args.repository}`, {
     Repository: args.repository,
     'Pull request': `#${args.number}`,
+    Comment: previewText(args.body),
     'Comment bytes': utf8Bytes(args.body),
     'Comment SHA-256': sha256({ body: args.body }),
   })
+}
+
+function genericReview(toolName, args) {
+  const invalid = () => { throw new TypeError('DSH_APPROVAL_REVIEW_INVALID') }
+  if (!args || typeof args !== 'object' || Array.isArray(args)) invalid()
+  const fields = { Tool: toolName }
+  if (['bash', 'pwsh'].includes(toolName)) {
+    if (!isBoundedString(args.command, 4096)) invalid()
+    fields.Command = previewText(args.command)
+    fields['Working directory'] = 'Task or agent workspace scratch (sandboxed)'
+    fields['Timeout ms'] = Math.min(Math.max(Number(args.timeoutMs ?? 30000), 1000), 60000)
+  } else if (['write', 'edit', 'str_replace_editor'].includes(toolName)) {
+    if (!isBoundedString(args.path)) invalid()
+    fields.Path = redactSensitiveText(args.path)
+    if (toolName === 'write') {
+      if (typeof args.content !== 'string') invalid()
+      fields.Content = previewText(args.content)
+      fields['Content bytes'] = utf8Bytes(args.content)
+      fields['Content SHA-256'] = sha256({ content: args.content })
+    } else {
+      if (typeof args.oldText !== 'string' || typeof args.newText !== 'string') invalid()
+      if (utf8Bytes(args.oldText) + utf8Bytes(args.newText) > 4096) invalid()
+      fields['Old text'] = previewText(args.oldText)
+      fields['New text'] = previewText(args.newText)
+      fields['Old text bytes'] = utf8Bytes(args.oldText)
+      fields['New text bytes'] = utf8Bytes(args.newText)
+      fields['Change SHA-256'] = sha256({ oldText: args.oldText, newText: args.newText })
+    }
+  } else {
+    // Do not silently truncate an approval: if all argument semantics cannot be
+    // represented safely and compactly, this call requires a dedicated adapter.
+    const encoded = JSON.stringify(args)
+    if (!encoded || utf8Bytes(encoded) > 4096) invalid()
+    const check = (value, depth = 0) => {
+      if (depth > 8 || value && typeof value === 'object' && Object.keys(value).length > 64) invalid()
+      if (value && typeof value === 'object') for (const child of Object.values(value)) check(child, depth + 1)
+    }
+    check(args)
+    fields.Arguments = JSON.stringify(redactSensitiveData(args))
+  }
+  const review = githubReview(`Review ${toolName}: verify the target and operation before approving.`, fields)
+  if (utf8Bytes(JSON.stringify(review)) > 8 * 1024
+    || Object.values(fields).some(value => typeof value === 'string' && (!value || value.length > 4096))
+    || Object.values(fields).some(value => typeof value === 'number' && !Number.isFinite(value))) invalid()
+  return review
+}
+
+function immutableArguments(value) {
+  const snapshot = structuredClone(value)
+  const freeze = (object, depth = 0) => {
+    if (depth > 32) throw new TypeError('DSH_ARGUMENTS_INVALID')
+    if (!object || typeof object !== 'object') return
+    if (!Array.isArray(object) && Object.getPrototypeOf(object) !== Object.prototype) throw new TypeError('DSH_ARGUMENTS_INVALID')
+    for (const child of Object.values(object)) freeze(child, depth + 1)
+    Object.freeze(object)
+  }
+  freeze(snapshot)
+  return snapshot
 }
 
 function actionWindow(grant, now, lifetimeMs = 5 * 60_000) {
@@ -142,6 +210,7 @@ function denial(reason) {
 
 export class DshEnforcementAdapter {
   #callByToken = new Map()
+  #snapshots = new WeakSet()
 
   constructor({
     gateway,
@@ -165,6 +234,12 @@ export class DshEnforcementAdapter {
   async preExecute(exec) {
     const actor = identityOf(exec)
     if (!actor) return denial('INVALID_DSH_EXECUTION_IDENTITY')
+    try {
+      if (!this.#snapshots.has(exec)) {
+        Object.defineProperty(exec, 'arguments', { value: immutableArguments(exec.arguments), writable: false, configurable: false })
+        this.#snapshots.add(exec)
+      }
+    } catch { return denial('DSH_ARGUMENTS_INVALID') }
 
     let route
     try {
@@ -222,7 +297,7 @@ export class DshEnforcementAdapter {
     })
     let review = null
     try {
-      review = approvalReviewForTool(call.toolName, exec.arguments)
+      if (GITHUB_WRITE_TOOLS.has(call.toolName)) review = approvalReviewForTool(call.toolName, exec.arguments)
     } catch {
       this.#auditDenied({
         ...actor,
@@ -276,6 +351,13 @@ export class DshEnforcementAdapter {
       return denial(gatewayDecision.reason)
     }
 
+    try { review ??= approvalReviewForTool(call.toolName, exec.arguments) }
+    catch {
+      this.gateway.cancelPending(gatewayDecision.actionId, 'DSH_APPROVAL_REVIEW_INVALID')
+      this.#auditDenied(facts, 'DSH_APPROVAL_REVIEW_INVALID')
+      return denial('DSH_APPROVAL_REVIEW_INVALID')
+    }
+
     this.audit.append({
       kind: 'dsh.approval.asked',
       ...facts,
@@ -307,7 +389,7 @@ export class DshEnforcementAdapter {
     }
     const finalDecision = signedDecision
       ? this.gateway.decide(signedDecision)
-      : { status: 'denied', reason: 'CHIMERA_SIGNED_APPROVAL_UNAVAILABLE' }
+      : this.gateway.cancelPending(gatewayDecision.actionId, 'CHIMERA_SIGNED_APPROVAL_UNAVAILABLE')
     await this.approvalBroker.complete?.(gatewayDecision.actionId, finalDecision)
     this.audit.append({
       kind: 'dsh.approval.decided',
