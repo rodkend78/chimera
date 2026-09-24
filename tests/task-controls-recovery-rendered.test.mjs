@@ -119,6 +119,20 @@ test('task controls render a bounded no-route explanation and rejected candidate
   assert.deepEqual(errors, [])
 })
 
+test('task controls describe a pending Jev choice as pending rather than ineligible', { timeout: 20000 }, async t => {
+  const { controls, errors } = await fixture(t, {
+    routing: {
+      schema: 'chimera.routing-explanation.v1', taskId: 'alpha', selected: null, selectionPending: true,
+      reasons: ['Jev selection pending among trusted eligible routes'], evidence: { status: 'unknown' },
+      candidates: [{ routeId: 'model-a', model: 'model-a', status: 'eligible' }, { routeId: 'model-b', model: 'model-b', status: 'eligible' }],
+      observedAt: '2026-09-19T00:00:00.000Z',
+    },
+  })
+  await controls.getByText(/Jev selection was pending/).waitFor()
+  assert.doesNotMatch(await controls.innerText(), /No eligible model route was available/)
+  assert.deepEqual(errors, [])
+})
+
 test('same-turn continuation submits once and its response preserves newer draft text', { timeout: 20000 }, async t => {
   const pending = gate(t)
   const { controls, calls, errors } = await fixture(t, { handler: async ({ route, path }) => {

@@ -146,6 +146,7 @@ test('Jev sees only trusted eligible routes and cannot override a pinned model',
   })
   const pending = router.explain({ prompt: 'Implement this.', context: { taskId: 'task-route' } })
   assert.equal(pending.selected, null)
+  assert.equal(pending.selectionPending, true)
   assert.match(pending.reasons[0], /Jev selection pending/)
   assert.equal((await router.route('Implement this.', { taskId: 'task-route' })).selected, 'allowed-b')
   assert.equal(Object.values(calls[0]).some(value => value.includes('denied')), false)

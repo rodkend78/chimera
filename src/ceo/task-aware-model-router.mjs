@@ -309,6 +309,7 @@ export function createTaskAwareModelRouter({
       schema: ROUTING_EXPLANATION_SCHEMA,
       taskId: boundedString(context?.taskId, 256) ? context.taskId : null,
       selected: selectedProjection,
+      ...(pendingDecision ? { selectionPending: true } : {}),
       candidates: path.candidates.map(candidate => {
         const trustedEligible = candidate.authority
           ? ['connectionEnabled', 'agentAllowed', 'executorAllowed', 'requirementsSatisfied', 'pinSatisfied']

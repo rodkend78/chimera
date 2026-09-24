@@ -242,6 +242,7 @@ function taskRoutingProjection(explanation, { taskId, agentId, now }) {
     schema: 'chimera.routing-explanation.v1',
     taskId: boundedRouteText(taskId, 256) ?? null,
     selected,
+    ...(explanation.selectionPending === true ? { selectionPending: true } : {}),
     candidates,
     reasons,
     evidence: safeRoutingEvidence(explanation.evidence),
