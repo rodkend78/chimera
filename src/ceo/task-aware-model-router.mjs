@@ -229,9 +229,11 @@ export function createTaskAwareModelRouter({
   eligibility = null,
   evidence = null,
   scope = null,
+  decisionService = null,
 } = {}) {
   if (!Array.isArray(routes) || routes.length === 0) throw new TypeError('at least one model route is required')
   if (eligibility !== null && typeof eligibility !== 'function') throw new TypeError('route eligibility must be a function')
+  if (decisionService !== null && typeof decisionService.choose !== 'function') throw new TypeError('decision service is invalid')
   const normalized = routes.map(normalizeRoute)
   if (new Set(normalized.map(route => route.id)).size !== normalized.length) {
     throw new TypeError('duplicate task-aware model route')
@@ -284,7 +286,12 @@ export function createTaskAwareModelRouter({
   }
 
   function explanationFor(path, context) {
-    const selected = path.selected
+    const eligible = path.candidates.filter(candidate => candidate.status === 'eligible')
+    const preferred = path.requirements.modelPreference?.mode === 'preferred'
+      && eligible.some(candidate => modelPreferenceReason(candidate.route, path.requirements.modelPreference) === null)
+    // The pre-dispatch explanation must not claim Jev's yet-unmade choice.
+    const pendingDecision = decisionService && eligible.length > 1 && eligible.length <= 8 && !preferred
+    const selected = pendingDecision ? null : path.selected
     const selectedReason = selected
       ? selected.route.reason ?? (path.requirements.priorityPreset === 'economy'
         ? (evidenceFor(selected.route, path.requirements, evidence)?.cost?.status === 'measured'
@@ -319,7 +326,8 @@ export function createTaskAwareModelRouter({
           ...(candidate.status !== 'eligible' ? { details: candidate.reasons } : {}),
         }
       }),
-      reasons: selected ? ['eligible after trusted hard filters', selectedReason] : ['NO_ELIGIBLE_MODEL_ROUTE'],
+      reasons: pendingDecision ? ['Jev selection pending among trusted eligible routes']
+        : selected ? ['eligible after trusted hard filters', selectedReason] : ['NO_ELIGIBLE_MODEL_ROUTE'],
       evidence: selected ? (evidenceFor(selected.route, path.requirements, evidence) ?? { status: 'unknown' }) : { status: 'unknown' },
       observedAt: new Date(now()).toISOString(),
     }
@@ -340,6 +348,7 @@ export function createTaskAwareModelRouter({
       keys.add(key)
       claims.push({ key, access: 'read', verified: true })
     }
+    if (decisionService && !keys.has('model:typesafe:jev-latest')) claims.push({ key: 'model:typesafe:jev-latest', access: 'read', verified: true })
     return claims.length > 0 ? claims : null
   }
 
@@ -351,10 +360,43 @@ export function createTaskAwareModelRouter({
       audit?.append({ kind: 'model.route.rejected', taskId: context?.taskId ?? null, requirements: path.requirements, reasons: path.candidates.flatMap(candidate => candidate.reasons), dispatchState: 'not_sent', at: new Date(now()).toISOString() })
       throw error
     }
-    const selected = path.selected
+    const eligible = path.candidates.filter(candidate => candidate.status === 'eligible')
+      .toSorted((left, right) => rankCandidates(left, right, path.requirements, evidence))
+    let selected = path.selected
+    let jevConfidence = null
+    const preferred = path.requirements.modelPreference?.mode === 'preferred'
+      && eligible.some(candidate => modelPreferenceReason(candidate.route, path.requirements.modelPreference) === null)
+    if (decisionService && eligible.length > 1 && eligible.length <= 8 && !preferred) {
+      const criteria = Object.fromEntries(eligible.map((candidate, index) => [
+        `route${index}`,
+        `${candidate.route.id}; provider: ${candidate.route.providerId ?? 'unknown'}; model: ${candidate.route.model ?? candidate.route.routerId}; capabilities: ${candidate.route.capabilities.join(', ')}; cost: ${candidate.route.costClass}; privacy: ${candidate.route.privacy ?? 'unknown'}`.slice(0, 512),
+      ]))
+      try {
+        const answer = await decisionService.choose({
+          state: JSON.stringify({ task: String(prompt).slice(0, 4000), stage: context?.stage ?? null,
+            requirements: path.requirements }).slice(0, 8192),
+          criteria,
+          taskId: boundedString(context?.taskId, 512) ? context.taskId : 'unknown',
+          use: 'model-route',
+        })
+        const index = answer ? Number(answer.choice.slice(5)) : -1
+        if (answer && Number.isInteger(index) && answer.choice === `route${index}` && eligible[index]) {
+          selected = eligible[index]
+          jevConfidence = answer.confidence
+        } else {
+          audit?.append({ kind: 'jev.decision.fallback', use: 'model-route', taskId: context?.taskId ?? null,
+            reason: 'JEV_LOW_CONFIDENCE', at: new Date(now()).toISOString() })
+        }
+      } catch (error) {
+        audit?.append({ kind: 'jev.decision.fallback', use: 'model-route', taskId: context?.taskId ?? null,
+          reason: boundedString(error?.code, 128) ? error.code : 'JEV_UNAVAILABLE', at: new Date(now()).toISOString() })
+      }
+      controls?.signal?.throwIfAborted()
+    }
     const startedAt = now()
     const selectedEvidence = evidenceFor(selected.route, path.requirements, evidence)
-    const selectionReason = selected.route.reason
+    const selectionReason = jevConfidence !== null ? 'Jev choice among trusted eligible routes'
+      : selected.route.reason
       ?? (path.requirements.priorityPreset === 'economy'
         ? (selectedEvidence?.cost?.status === 'measured'
           ? 'selected by measured cost evidence'
@@ -363,7 +405,8 @@ export function createTaskAwareModelRouter({
             : 'selected by trusted hard filters and ranking; cost evidence is unknown')
         : 'selected by trusted hard filters and ranking')
     audit?.append({ kind: 'model.route.selected', routeId: selected.route.id, routerId: selected.route.routerId, taskId: context?.taskId ?? null,
-      requirements: path.requirements, selectionReason, costMeasured: selectedEvidence?.cost?.status === 'measured', at: new Date(startedAt).toISOString() })
+      requirements: path.requirements, selectionReason, ...(jevConfidence === null ? {} : { jevConfidence }),
+      costMeasured: selectedEvidence?.cost?.status === 'measured', at: new Date(startedAt).toISOString() })
     try {
       const result = await selected.route.router.route(prompt, structuredClone(context), controls)
       controls?.signal?.throwIfAborted()

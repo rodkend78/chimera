@@ -860,7 +860,7 @@ export class LocalModelFabricRegistry {
     return this.activeRouter
   }
 
-  async routerFor({ mode = 'auto', providerId, model } = {}, scope = null) {
+  async routerFor({ mode = 'auto', providerId, model } = {}, scope = null, { decisionService = null } = {}) {
     if (mode === 'auto') {
       // Auto means the registry's current operator-selected route when one
       // exists. Rebuild that explicit route with the captured scope so the
@@ -880,7 +880,7 @@ export class LocalModelFabricRegistry {
           scope,
         })).router
       }
-      if (scope && capturedAuto) return this.#createFabric(scope)
+      if (scope && capturedAuto) return this.#createFabric(scope, decisionService)
       if (scope && this.selection && this.selection.providerId !== 'chimera-auto' && this.selection.model !== 'auto') {
         return (await this.#resolveExplicitRouter({
           providerId: this.selection.providerId,
@@ -889,7 +889,7 @@ export class LocalModelFabricRegistry {
         })).router
       }
       if (!this.fabric) throw availabilityFailure('NO_MODEL_PROVIDER_CONFIGURED')
-      return scope ? this.#createFabric(scope) : this.fabric
+      return scope ? this.#createFabric(scope, decisionService) : this.fabric
     }
     if (!['preferred', 'pinned'].includes(mode)) throw availabilityFailure('MODEL_SELECTION_INVALID')
     return (await this.#resolveExplicitRouter({ providerId, model, scope })).router
@@ -901,7 +901,7 @@ export class LocalModelFabricRegistry {
       : null
   }
 
-  #createFabric(scope = null) {
+  #createFabric(scope = null, decisionService = null) {
     return this.routeDescriptors.length > 0
       ? createTaskAwareModelRouter({
           routes: this.routeDescriptors,
@@ -912,6 +912,7 @@ export class LocalModelFabricRegistry {
           eligibility: this.#scopedEligibility(scope),
           evidence: this.evidence,
           scope,
+          decisionService,
         })
       : null
   }

@@ -240,6 +240,37 @@ test('CEO delegates a bounded task, synthesizes the result, and posts an attribu
   }
 })
 
+test('Jev reroutes only an unbound specialist plan before publication', async () => {
+  const f = await fixture()
+  try {
+    const choices = []
+    f.workspace.specialistCatalog.set('analyst', { agentId: 'analyst', role: 'Analysis specialist', capabilities: ['reasoning'] })
+    f.workspace.resolveSpecialist = async () => { throw new Error('dispatch must not start') }
+    f.workspace.specialistRouteCandidates = ['researcher', 'analyst']
+    f.workspace.decisionService = { async choose(input) { choices.push(input); return { choice: 'agent1', confidence: 0.96 } } }
+    f.workspace.modelRouter = createDeterministicModelRouter({ routerId: 'jev-plan-fixture', responder: async () => ({ tasks: [{
+      specialistAgentId: 'researcher', objective: 'Analyze the bounded request.', acceptanceCriteria: ['Return the answer.'],
+    }] }) })
+    let published = null
+    f.workspace.onPlan = async plan => { published = plan; throw new Error('STOP_AFTER_PLAN') }
+    await assert.rejects(f.workspace.receive({ envelope: f.inbound(), senderGrant: f.operatorGrant }), /STOP_AFTER_PLAN/)
+    assert.equal(choices.length, 1)
+    assert.equal(published.tasks[0].specialistAgentId, 'analyst')
+    assert.equal(f.audit.entries().some(entry => entry.fact.kind === 'jev.specialist.selected'
+      && entry.fact.agentId === 'analyst'), true)
+
+    choices.length = 0
+    published = null
+    f.workspace.modelRouter = createDeterministicModelRouter({ routerId: 'jev-bound-fixture', responder: async () => ({ tasks: [{
+      specialistAgentId: 'researcher', objective: 'Read the bounded request.', acceptanceCriteria: ['Return the answer.'],
+      request: { capability: 'filesystem.read', resource: 'workspace/research.md', operation: 'read' },
+    }] }) })
+    await assert.rejects(f.workspace.receive({ envelope: f.inbound(), senderGrant: f.operatorGrant }), /STOP_AFTER_PLAN/)
+    assert.equal(choices.length, 0)
+    assert.equal(published.tasks[0].specialistAgentId, 'researcher')
+  } finally { await f.close() }
+})
+
 test('CEO derives a targeted specialist constraint from the signed direct-message payload', async () => {
   const f = await fixture()
   try {
