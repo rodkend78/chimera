@@ -18,7 +18,7 @@ function safeRecovery(value) {
     requestId: receipt.requestId,
     ...(typeof receipt.providerId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(receipt.providerId) ? { providerId: receipt.providerId } : {}),
     ...(typeof receipt.operation === 'string' && /^[a-z-]{3,32}$/.test(receipt.operation) ? { operation: receipt.operation } : {}),
-    ...(typeof receipt.model === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$/.test(receipt.model) ? { model: receipt.model } : {}),
+    ...(typeof receipt.model === 'string' && /^~?[A-Za-z0-9][A-Za-z0-9._~:/@+-]{0,511}$/.test(receipt.model) ? { model: receipt.model } : {}),
     ...(typeof receipt.status === 'string' && ['pending', 'succeeded', 'failed', 'unknown'].includes(receipt.status) ? { status: receipt.status } : {}),
   }
 }

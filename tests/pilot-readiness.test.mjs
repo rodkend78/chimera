@@ -88,3 +88,14 @@ test('pilot readiness starts with an installed signed-out Codex CLI so the UI ca
   assert.match(result.checks.find((check) => check.id === 'model-provider').message, /Connect ChatGPT/)
   assert.deepEqual(result.configuredProviders, [])
 })
+
+test('pilot readiness permits OpenRouter setup through Settings without a CLI', () => {
+  const result = evaluatePilotReadiness({
+    nodeVersion: '22.19.0', host: '127.0.0.1', chromiumAvailable: true,
+    filesystemBrokerAvailable: true, envFile: { exists: false },
+    modelAccess: { codex: { available: false, configured: false }, bedrock: { configured: false },
+      claudeCode: { available: false, configured: false }, openrouter: { available: true, configured: false } },
+  })
+  assert.equal(result.ready, true)
+  assert.match(result.checks.find(check => check.id === 'model-provider').message, /OpenRouter key in Settings/)
+})

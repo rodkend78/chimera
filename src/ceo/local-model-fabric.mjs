@@ -75,7 +75,7 @@ function safeCompatibleErrorCode(error) {
     : 'MODEL_PROVIDER_FAILURE'
 }
 
-function openAiCompatibleSettings(config, env) {
+function openAiCompatibleSettings(config, env, keyResolvers = {}) {
   const providers = config.openAiCompatibleProviders ?? []
   if (!Array.isArray(providers)) throw new TypeError('invalid local model fabric configuration')
   const normalized = providers.map((provider) => {
@@ -111,11 +111,15 @@ function openAiCompatibleSettings(config, env) {
     if (new Set(models.map((model) => model.id)).size !== models.length) {
       throw new TypeError('invalid local model fabric configuration')
     }
+    const apiKeyForCall = keyResolvers[provider.id] ?? null
+    if (apiKeyForCall !== null && typeof apiKeyForCall !== 'function') throw new TypeError('invalid local model fabric configuration')
+    const initialApiKey = boundedString(env?.[provider.apiKeyEnv], 16_384) ? env[provider.apiKeyEnv] : null
     return {
       id: provider.id,
       name: provider.name,
       baseUrl: provider.baseUrl,
-      apiKey: boundedString(env?.[provider.apiKeyEnv], 16_384) ? env[provider.apiKeyEnv] : null,
+      get apiKey() { return apiKeyForCall ? apiKeyForCall() : initialApiKey },
+      apiKeyForCall,
       models,
     }
   })
@@ -352,6 +356,7 @@ export class LocalModelFabricRegistry {
     codexStatus,
     codexClient = null,
     antigravity = null,
+    claudeCode = null,
     bedrockControlClient,
     bedrockRuntimeClient,
     bedrockModels,
@@ -367,6 +372,7 @@ export class LocalModelFabricRegistry {
     mantleSigner,
     mantleFetch = globalThis.fetch,
     openAiCompatibleFetch = globalThis.fetch,
+    openAiCompatibleKeyResolvers = {},
     env = process.env,
     now = () => Date.now(),
     routeGuard = null,
@@ -384,7 +390,7 @@ export class LocalModelFabricRegistry {
     let resolvedProfiles = bedrockProfiles
     let bedrockError = null
     const resolvedMantleSettings = mantleSettings(normalizedConfig)
-    const resolvedOpenAiCompatibleProviders = openAiCompatibleSettings(normalizedConfig, env)
+    const resolvedOpenAiCompatibleProviders = openAiCompatibleSettings(normalizedConfig, env, openAiCompatibleKeyResolvers)
     const resolvedMantleApiKey = mantleApiKey
       ?? env?.CHIMERA_BEDROCK_MANTLE_API_KEY
       ?? env?.BEDROCK_API_KEY
@@ -457,6 +463,7 @@ export class LocalModelFabricRegistry {
       codexStatus: resolvedCodexStatus,
       codexClient,
       antigravity,
+      claudeCode,
       bedrockControlClient: resolvedControl,
       bedrockRuntimeClient: resolvedRuntime,
       bedrockModels: resolvedModels,
@@ -493,6 +500,7 @@ export class LocalModelFabricRegistry {
     codexStatus,
     codexClient,
     antigravity,
+    claudeCode,
     bedrockControlClient,
     bedrockRuntimeClient,
     bedrockModels,
@@ -528,6 +536,7 @@ export class LocalModelFabricRegistry {
     this.audit = audit
     this.codexStatus = codexStatus
     this.antigravity = antigravity
+    this.claudeCode = claudeCode
     this.bedrockModels = bedrockModels
     this.bedrockProfiles = bedrockProfiles
     this.bedrockError = bedrockError
@@ -750,10 +759,58 @@ export class LocalModelFabricRegistry {
       ...(route.nativeExecution ? { nativeExecution: true } : {}),
       costClass: route.costClass,
     }))
+    this.#refreshLocalRoutes()
   }
+
+  #refreshLocalRoutes() {
+    const routes = this.routeDescriptors.filter(route => !['claude-code', 'openrouter'].includes(route.providerId))
+    const claude = this.claudeCode?.state()
+    if (claude?.configured) {
+      for (const model of claude.models) {
+        routes.push({ id: `claude-code-${model.id}`, router: inferenceOnlyRouter(this.claudeCode.router(model.id), this.routeGuard),
+          providerId: 'claude-code', model: model.id,
+          capabilities: ['conversation', 'orchestration', 'coding', 'reasoning', 'research', 'bulk'],
+          inputModalities: ['TEXT'], outputModalities: ['TEXT'], priority: model.id === 'sonnet' ? -1 : -2,
+          authority: { connectionEnabled: true, agentAllowed: true, executorAllowed: true, requirementsSatisfied: true, pinSatisfied: true, reasons: [] },
+          costClass: 'subscription' })
+      }
+    }
+    const openrouter = this.openAiCompatibleProviders.get('openrouter')
+    if (openrouter && typeof openrouter.apiKey === 'string' && openrouter.apiKey.length > 0) {
+      for (const model of openrouter.models) {
+        routes.push({ id: `openrouter-${model.id}`, router: inferenceOnlyRouter(createOpenAiCompatibleModelRouter({
+          providerId: 'openrouter', model: model.id, baseUrl: openrouter.baseUrl,
+          apiKey: openrouter.apiKeyForCall ? undefined : openrouter.apiKey,
+          apiKeyForCall: openrouter.apiKeyForCall,
+          fetchImpl: this.openAiCompatibleFetch,
+        }), this.routeGuard), providerId: 'openrouter', model: model.id,
+        capabilities: ['conversation', 'orchestration', 'coding', 'reasoning', 'research', 'bulk'],
+        inputModalities: ['TEXT'], outputModalities: ['TEXT'], priority: -3,
+        authority: { connectionEnabled: true, agentAllowed: true, executorAllowed: true, requirementsSatisfied: true, pinSatisfied: true, reasons: [] },
+        costClass: 'variable-api' })
+      }
+    }
+    this.routeDescriptors = routes
+    this.fabric = this.#createFabric()
+    this.routeState = routes.map(route => ({ id: route.id, providerRouterId: route.router.routerId,
+      capabilities: [...route.capabilities], providerId: route.providerId, model: route.model,
+      ...(route.inputModalities ? { inputModalities: [...route.inputModalities] } : {}),
+      ...(route.outputModalities ? { outputModalities: [...route.outputModalities] } : {}),
+      ...(route.nativeExecution ? { nativeExecution: true } : {}), costClass: route.costClass }))
+    if (!this.selection || this.selection.providerId === 'chimera-auto'
+      || this.selection.providerId === 'claude-code' && !claude?.configured
+      || this.selection.providerId === 'openrouter' && !openrouter?.apiKey) {
+      this.activeRouter = this.fabric
+      this.selection = this.fabric ? { providerId: 'chimera-auto', providerName: 'Chimera Auto',
+        model: 'auto', modelName: 'Best model for task' } : null
+    }
+  }
+
+  refreshClaudeCode() { this.#refreshLocalRoutes(); return this.state() }
 
   state() {
     const antigravity = this.antigravity?.state()
+    const claude = this.claudeCode?.state()
     const bedrockModels = this.bedrockCatalog.map((model) => ({
       ...model,
       ...(this.accessState.has(model.id) ? this.accessState.get(model.id) : {}),
@@ -794,6 +851,12 @@ export class LocalModelFabricRegistry {
         capabilityCounts,
       },
       providers: [
+        ...(claude ? [{ id: 'claude-code', name: 'Claude Code', configured: claude.configured,
+          authentication: claude.configured ? 'Claude Code account' : null,
+          connectionStatus: claude.status, execution: 'inference-only',
+          models: claude.models.map(model => ({ ...model, availability: claude.configured ? 'authenticated' : 'access-required',
+            capabilities: ['conversation', 'orchestration', 'coding', 'reasoning', 'research', 'bulk'],
+            inputModalities: ['TEXT'], outputModalities: ['TEXT'] })) }] : []),
         ...(antigravity ? [{
           id: 'antigravity', name: 'Antigravity', configured: antigravity.configured,
           authentication: 'Antigravity account', connectionStatus: antigravity.status,
@@ -849,6 +912,24 @@ export class LocalModelFabricRegistry {
         jobs: [...this.mediaJobs.values()].map((job) => publicMediaArtifact(job, { includeArtifactUrl: false })),
       },
     }
+  }
+
+  setOpenAiCompatibleModels(providerId, models) {
+    const provider = this.openAiCompatibleProviders.get(providerId)
+    if (!provider || providerId !== 'openrouter' || !Array.isArray(models) || models.length < 1 || models.length > 16
+      || models.some(model => typeof model !== 'string' || model.length > 256)) throw availabilityFailure('MODEL_SELECTION_INVALID')
+    provider.models = models.map(model => ({ id: model, name: model,
+      capabilities: ['conversation', 'orchestration', 'coding', 'reasoning', 'research', 'bulk'],
+      inputModalities: ['TEXT'], outputModalities: ['TEXT'] }))
+    for (const key of this.openAiCompatibleAccessState.keys()) {
+      if (key.startsWith(`${providerId}:`)) this.openAiCompatibleAccessState.delete(key)
+    }
+    if (this.selection?.providerId === providerId && !models.includes(this.selection.model)) {
+      this.activeRouter = this.fabric
+      this.selection = this.fabric ? { providerId: 'chimera-auto', providerName: 'Chimera Auto', model: 'auto', modelName: 'Best model for task' } : null
+    }
+    this.#refreshLocalRoutes()
+    return this.state()
   }
 
   router() {
@@ -983,6 +1064,9 @@ export class LocalModelFabricRegistry {
 
   #askCandidates() {
     const candidates = []
+    if (this.claudeCode?.state().configured) {
+      for (const entry of this.claudeCode.state().models) candidates.push({ providerId: 'claude-code', model: entry.id })
+    }
     for (const provider of this.openAiCompatibleProviders.values()) {
       if (!boundedString(provider.apiKey, 16_384)) continue
       for (const model of provider.models.filter((entry) => entry.capabilities.includes('conversation'))) {
@@ -1005,6 +1089,8 @@ export class LocalModelFabricRegistry {
   #askCandidateAvailable({ providerId, model } = {}) {
     if (!boundedString(providerId, 256) || !boundedString(model, 512)) return false
     if (providerId === 'codex' || providerId === 'antigravity' || providerId === 'chimera-auto') return false
+    if (providerId === 'claude-code') return Boolean(this.claudeCode?.state().configured
+      && this.claudeCode.state().models.some(entry => entry.id === model))
     const compatibleProvider = this.openAiCompatibleProviders.get(providerId)
     if (compatibleProvider) {
       return boundedString(compatibleProvider.apiKey, 16_384)
@@ -1027,6 +1113,10 @@ export class LocalModelFabricRegistry {
     if (providerId === 'codex' || providerId === 'antigravity' || providerId === 'chimera-auto') {
       throw availabilityFailure('ASK_EXECUTOR_NOT_PURE')
     }
+    if (providerId === 'claude-code') {
+      if (!this.#askCandidateAvailable({ providerId, model })) throw availabilityFailure('CLAUDE_CODE_MODEL_UNAVAILABLE')
+      return inferenceOnlyRouter(this.claudeCode.router(model), this.routeGuard)
+    }
     const compatibleProvider = this.openAiCompatibleProviders.get(providerId)
     if (compatibleProvider) {
       const selected = compatibleProvider.models.find((entry) => entry.id === model)
@@ -1036,7 +1126,8 @@ export class LocalModelFabricRegistry {
         providerId,
         model,
         baseUrl: compatibleProvider.baseUrl,
-        apiKey: compatibleProvider.apiKey,
+        apiKey: compatibleProvider.apiKeyForCall ? undefined : compatibleProvider.apiKey,
+        apiKeyForCall: compatibleProvider.apiKeyForCall,
         fetchImpl: this.openAiCompatibleFetch,
       }), this.routeGuard)
       if (router.descriptor?.execution !== 'inference-only') throw availabilityFailure('ASK_EXECUTOR_NOT_PURE')
@@ -1092,6 +1183,14 @@ export class LocalModelFabricRegistry {
     }
     if (!['preferred', 'pinned'].includes(mode)) throw availabilityFailure('MODEL_SELECTION_INVALID')
     const compatibleProvider = this.openAiCompatibleProviders.get(providerId)
+    if (providerId === 'claude-code') {
+      const state = this.claudeCode?.state()
+      const selected = state?.models.find(entry => entry.id === model)
+      return { ...base, providerId, model, modelName: selected?.name ?? null,
+        eligible: Boolean(state?.configured && selected),
+        availability: state?.configured && selected ? 'available' : 'unavailable',
+        ...(state?.configured && selected ? {} : { reason: 'CLAUDE_CODE_MODEL_UNAVAILABLE' }) }
+    }
     if (providerId === 'antigravity') {
       const state = this.antigravity?.state()
       const selected = state?.models?.find(entry => entry.id === model)
@@ -1171,6 +1270,19 @@ export class LocalModelFabricRegistry {
   }
 
   async #resolveExplicitRouter({ providerId, model, scope = null }) {
+    if (providerId === 'claude-code') {
+      const state = this.claudeCode?.state()
+      const selected = state?.models.find(entry => entry.id === model)
+      if (!state?.configured || !selected) throw availabilityFailure('CLAUDE_CODE_MODEL_UNAVAILABLE')
+      return { router: createTaskAwareModelRouter({ routes: [{ id: `claude-code-manual-${model}`,
+        router: inferenceOnlyRouter(this.claudeCode.router(model), this.routeGuard),
+        capabilities: ['conversation', 'orchestration', 'coding', 'reasoning', 'research', 'bulk'],
+        inputModalities: ['TEXT'], outputModalities: ['TEXT'], providerId, model, ...routeScopeMetadata(scope),
+        authority: { connectionEnabled: true, agentAllowed: true, executorAllowed: true, requirementsSatisfied: true, pinSatisfied: true, reasons: [] },
+        costClass: 'subscription' }], audit: this.audit, now: this.now, routerId: 'model-fabric:manual:claude-code',
+        model, eligibility: this.#scopedEligibility(scope), evidence: this.evidence, scope }),
+        selection: { providerId, providerName: 'Claude Code', model, modelName: selected.name } }
+    }
     if (providerId === 'antigravity') {
       const state = this.antigravity?.state()
       const selected = state?.models.find(entry => entry.id === model)
@@ -1223,7 +1335,8 @@ export class LocalModelFabricRegistry {
         providerId,
         model,
         baseUrl: compatibleProvider.baseUrl,
-        apiKey: compatibleProvider.apiKey,
+        apiKey: compatibleProvider.apiKeyForCall ? undefined : compatibleProvider.apiKey,
+        apiKeyForCall: compatibleProvider.apiKeyForCall,
         fetchImpl: this.openAiCompatibleFetch,
       })
       return {
@@ -1333,6 +1446,11 @@ export class LocalModelFabricRegistry {
   }
 
   async check({ providerId, model } = {}) {
+    if (providerId === 'claude-code') {
+      if (!this.#askCandidateAvailable({ providerId, model })) throw availabilityFailure('CLAUDE_CODE_MODEL_UNAVAILABLE')
+      await this.claudeCode.router(model).route('Return a concise readiness summary.', { stage: 'specialist', taskId: 'model-access-check' })
+      return { id: model, name: model, availability: 'verified-manual' }
+    }
     const compatibleProvider = this.openAiCompatibleProviders.get(providerId)
     if (compatibleProvider) {
       const selected = compatibleProvider.models.find((entry) => entry.id === model)
@@ -1348,7 +1466,8 @@ export class LocalModelFabricRegistry {
           providerId,
           model,
           baseUrl: compatibleProvider.baseUrl,
-          apiKey: compatibleProvider.apiKey,
+          apiKey: compatibleProvider.apiKeyForCall ? undefined : compatibleProvider.apiKey,
+          apiKeyForCall: compatibleProvider.apiKeyForCall,
           fetchImpl: this.openAiCompatibleFetch,
         })
         await router.route('Return a concise readiness summary.', { stage: 'specialist', taskId: 'model-access-check' })

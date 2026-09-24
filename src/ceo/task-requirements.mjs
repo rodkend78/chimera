@@ -7,7 +7,7 @@ const MAX_TOKEN = 128
 const MAX_CONTEXT_TOKENS = 4_000_000
 const MAX_ESTIMATED_USD = 1_000_000
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
-const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$/
+const MODEL_ID = /^~?[A-Za-z0-9][A-Za-z0-9._~:/@+-]{0,511}$/
 const MODALITY = /^[A-Z][A-Z0-9._:-]{0,31}$/
 const ALLOWED_FIELDS = new Set([
   'schema', 'capabilities', 'inputModalities', 'outputModalities', 'requiredTools',

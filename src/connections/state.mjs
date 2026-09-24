@@ -40,7 +40,7 @@ function safeIdentifier(value, maximum = MAX_TEXT) {
 
 function safeModel(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= MAX_MODEL
-    && /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$/.test(value)
+    && /^~?[A-Za-z0-9][A-Za-z0-9._~:/@+-]{0,511}$/.test(value)
     ? value
     : null
 }

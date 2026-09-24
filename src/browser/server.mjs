@@ -181,6 +181,16 @@ const server = createServer(async (request, response) => {
       return replyJson(200, await runtime.saveJevKey(body.apiKey))
     }
     if (url.pathname === '/api/jev/disconnect' && request.method === 'POST') return replyJson(200, await runtime.disconnectJev())
+    if (url.pathname === '/api/openrouter/settings' && request.method === 'GET') return replyJson(200, runtime.openRouterStatus())
+    if (url.pathname === '/api/openrouter/settings' && request.method === 'POST') {
+      const body = await bodyOf(request, 20_000)
+      if (!body || Object.keys(body).some(key => !['apiKey', 'models'].includes(key))
+        || !Object.keys(body).length) return replyJson(400, { error: 'OPENROUTER_SETTINGS_INVALID' })
+      return replyJson(200, await runtime.saveOpenRouterSettings(body))
+    }
+    if (url.pathname === '/api/openrouter/disconnect' && request.method === 'POST') return replyJson(200, await runtime.disconnectOpenRouter())
+    if (url.pathname === '/api/claude-code/status' && request.method === 'GET') return replyJson(200, runtime.claudeCode.state())
+    if (url.pathname === '/api/claude-code/refresh' && request.method === 'POST') return replyJson(200, await runtime.refreshClaudeCode())
     if (url.pathname === '/api/models' && request.method === 'GET') return replyJson( 200, runtime.modelState())
     if (url.pathname === '/api/models/check' && request.method === 'POST') return replyJson( 200, await runtime.checkModelAccess(await bodyOf(request)))
     if (url.pathname === '/api/models/select' && request.method === 'POST') return replyJson( 200, await runtime.selectModel(await bodyOf(request)))

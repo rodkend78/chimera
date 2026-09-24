@@ -57,9 +57,10 @@ Install the following before starting:
 - Linux only: the `bubblewrap` package must provide `/usr/bin/bwrap` for local
   harness sandbox checks. Linux test runs also need Playwright's OS
   dependencies; install them with the test command below.
-- The Codex CLI for the current CEO path. Bedrock specialists do not replace
-  this requirement: the readiness check requires Codex to be installed, and
-  CEO orchestration becomes available after the operator connects ChatGPT.
+- At least one text model connection for tasks: a signed-in Codex CLI, a
+  signed-in Claude Code CLI (version 2.1.248 or newer), or your own OpenRouter
+  API key entered in **Settings → Connections** after startup. AWS Bedrock
+  remains an optional specialist lane.
 
 AWS CLI credentials and access are optional for Bedrock specialist and worker
 lanes. They use the operator's own AWS account and can incur AWS charges.
@@ -121,9 +122,9 @@ credential vault.
 
 ## Model account setup
 
-The current CEO route uses the Codex CLI and the operator's ChatGPT
-subscription. Install the CLI according to its own documentation, then check
-its local status and connect it from Chimera when prompted:
+Chimera can use Codex through the operator's ChatGPT subscription, Claude Code
+through the operator's local signed-in CLI, or OpenRouter with the operator's
+own API key. For Codex, install the CLI and connect it from Chimera:
 
 ```sh
 codex login
@@ -153,9 +154,9 @@ aws sts get-caller-identity --region us-west-2
 ```
 
 This command is an operator check, not a required install step. Model discovery
-does not prove invocation access, quota, privacy, or cost. Chimera does not
-advertise a standalone all-model CEO orchestrator: the current CEO path still
-requires Codex CLI availability and a connected ChatGPT account.
+does not prove invocation access, quota, privacy, or cost. Claude Code and
+OpenRouter models can be chosen for RJ, specialists, and Ask after connecting;
+Chimera's authorization and approval boundaries still govern task actions.
 
 ## First-run secure launch
 
@@ -166,8 +167,8 @@ npm run pilot:check
 ```
 
 It verifies Node, the POSIX Python broker, loopback binding, Chromium, `.env` permissions when a file is
-present, and Codex CLI availability. A missing optional AWS account is not a
-startup failure. Fix any `BLOCK` line before continuing.
+present, and the model connection setup path. A missing optional AWS account is
+not a startup failure. Fix any `BLOCK` line before continuing.
 
 For a foreground pilot, use:
 
