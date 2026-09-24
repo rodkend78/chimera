@@ -32,7 +32,7 @@ The checked-in source demonstrates:
 - ADE project registration, task-isolated workspaces, short-lived access leases,
   digest-bound review, and an explicit commit boundary.
 - Optional Codex, AWS Bedrock Runtime, AWS Bedrock Mantle, Antigravity, Google
-  intake, Hermes discovery, RJ AWS, and media adapters. These connectors are
+  intake, Hermes discovery, RJ AWS, TypeSafe Jev, and media adapters. These connectors are
   opt-in and disabled or denied when their required configuration is absent.
 
 The browser, model, cloud, and connector adapters have different trust and
@@ -94,6 +94,30 @@ chmod 600 .env
 Never copy a production `.env`, `.chimera` directory, browser profile, private
 key, OAuth token, provider credential, or customer data into this checkout.
 The `.chimera/` directory is local runtime state and is ignored by Git.
+
+## Optional TypeSafe Jev setup
+
+In **Settings → Connections → TypeSafe Jev**, enter your own API key from the
+[TypeSafe dashboard](https://console.typesafe.ai/). Chimera saves it only in
+`.chimera/jev/key.json` with owner-only permissions. The Settings API reports
+whether Jev is configured; it never returns the saved key. Replace or remove
+the key from the same screen. Each local Chimera installation needs its own key;
+no credential is included in the repository.
+
+Jev makes typed decisions: it may choose among models that have already passed
+Chimera's trusted eligibility checks, suggest an eligible specialist for an
+unbound task, or answer a worker's bounded Choice, Score, or yes/no question.
+It does not write task output or execute tools. Chimera keeps the current route
+when Jev is unavailable or its answer is below the confidence threshold. A
+separate execution model is still required.
+
+When connected, Chimera sends relevant task text and requirements for routing,
+or the state supplied with an explicit `jev_decide` tool call, to TypeSafe's
+`/v1/systemone` API. Calls pass through the signed model gateway and durable
+model-call ledger. Use a key only if the tasks you submit may share that data
+with TypeSafe. Disconnecting removes the saved key; a call already in flight
+may still finish. This beta is a local single-operator pilot, not a multi-user
+credential vault.
 
 ## Model account setup
 

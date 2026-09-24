@@ -43,6 +43,8 @@ import { DurableDecisionQueue, HumanDecisionHandler } from '../ceo/decisions.mjs
 import { DurableConversationLedger } from '../ceo/conversation-ledger.mjs'
 import { AskService, createAskModelProvider } from '../ceo/ask-service.mjs'
 import { createGatewayModelRouter } from '../ceo/gateway-model-router.mjs'
+import { createJevDecisionService, createJevModelRouter } from '../ceo/jev-decision.mjs'
+import { JevSettings } from '../ceo/jev-settings.mjs'
 import { DurableModelCallLedger, createReliableModelRouter } from '../ceo/reliable-model-router.mjs'
 import { createTaskFailureFromError, createTrustedModelCallNotSentError, isTrustedModelCallNotSentError } from '../ceo/model-call-errors.mjs'
 import { RoutingEvidenceStore } from '../ceo/routing-evidence.mjs'
@@ -240,6 +242,7 @@ function taskRoutingProjection(explanation, { taskId, agentId, now }) {
     schema: 'chimera.routing-explanation.v1',
     taskId: boundedRouteText(taskId, 256) ?? null,
     selected,
+    ...(explanation.selectionPending === true ? { selectionPending: true } : {}),
     candidates,
     reasons,
     evidence: safeRoutingEvidence(explanation.evidence),
@@ -577,6 +580,9 @@ export class ChimeraBrowserRuntime {
     connectionFile,
     connectionPolicy,
     connectionService,
+    jevSettings = null,
+    jevSettingsFile,
+    jevFetch = globalThis.fetch,
     connectionMachineRef = process.env.CHIMERA_MACHINE_REF ?? null,
     connectionMachineRefFile,
     codexAuth,
@@ -608,6 +614,9 @@ export class ChimeraBrowserRuntime {
     this.connectionMachineRefFile = connectionMachineRefFile ?? resolve(profileDir, '../../connections/machine-ref.json')
     this.connectionPolicy = connectionPolicy ?? null
     this.connectionService = connectionService ?? null
+    this.jevSettings = jevSettings
+    this.jevSettingsFile = jevSettingsFile ?? resolve(profileDir, '../../jev/key.json')
+    this.jevFetch = jevFetch
     this.connectionMachineRef = connectionMachineRef
     this.cachedConnectionState = []
     this.identityStore = identityStore ?? null
@@ -708,6 +717,8 @@ export class ChimeraBrowserRuntime {
   async start() {
     const policy = JSON.parse(await readFile(POLICY_URL, 'utf8'))
     this.audit ??= await openRuntimeAudit({ filePath: this.auditFile })
+    this.jevSettings ??= await JevSettings.open({ filePath: this.jevSettingsFile })
+    this.jevProvider = createJevModelRouter({ apiKeyForCall: () => this.jevSettings.apiKey(), fetchImpl: this.jevFetch })
     this.routingEvidence ??= await RoutingEvidenceStore.open({
       filePath: this.routingEvidenceFile,
       audit: this.audit,
@@ -3459,6 +3470,32 @@ export class ChimeraBrowserRuntime {
     return this.agentModelPolicy.set(agentId, preference, { changedBy: this.humanId })
   }
 
+  jevStatus() { return this.jevSettings.status() }
+
+  async saveJevKey(apiKey) {
+    const status = await this.jevSettings.save(apiKey)
+    this.audit.append({ kind: 'jev.settings.updated', configured: true, at: new Date(this.now()).toISOString() })
+    return status
+  }
+
+  async disconnectJev() {
+    const status = await this.jevSettings.disconnect()
+    this.audit.append({ kind: 'jev.settings.updated', configured: false, at: new Date(this.now()).toISOString() })
+    return status
+  }
+
+  #jevForAgent({ grant, identity, agentId }) {
+    if (!this.jevSettings.status().configured) return null
+    return createJevDecisionService({
+      router: createReliableModelRouter({
+        provider: createGatewayModelRouter({ provider: this.jevProvider,
+          gateway: this.gateway, grant, identity, audit: this.audit, agentId, now: this.now }),
+        ledger: this.modelCalls, audit: this.audit, now: this.now,
+      }),
+      audit: this.audit, now: this.now,
+    })
+  }
+
   async #routerForAgent(agentId, {
     taskId = null,
     nodeId = null,
@@ -3467,6 +3504,7 @@ export class ChimeraBrowserRuntime {
     taskModelPreference = null,
     taskRequirements = null,
     taskStage = 'specialist',
+    decisionService = null,
   } = {}) {
     const policyPreference = this.agentModelPolicy.get(agentId)
     // A task-level model preference narrows the operator's captured default,
@@ -3528,7 +3566,7 @@ export class ChimeraBrowserRuntime {
         try {
           // Preferred fallback is bound to the admission-time selection. It
           // cannot silently use a newer operator selection for this task.
-          return await this.models.routerFor({ mode: 'auto' }, fallbackScope)
+          return await this.models.routerFor({ mode: 'auto' }, fallbackScope, { decisionService })
         } catch (autoError) {
           // Legacy registries expose only their owned global Auto route. That
           // compatibility path is not used by scoped model fabrics, where the
@@ -3607,7 +3645,7 @@ export class ChimeraBrowserRuntime {
     if (preference.mode === 'auto') {
       if (scopedRouterFor) {
         try {
-          return await this.models.routerFor(preference, scope)
+          return await this.models.routerFor(preference, scope, { decisionService })
         } catch (error) {
           if (typeof this.models.router === 'function') return this.models.router()
           throw error
@@ -3620,7 +3658,7 @@ export class ChimeraBrowserRuntime {
       // task-aware fabrics take the scoped path above.
       if (hasRouterFor && agentId !== this.agentId) {
         try {
-          return await this.models.routerFor(preference, scope)
+          return await this.models.routerFor(preference, scope, { decisionService })
         } catch (error) {
           if (typeof this.models.router === 'function') return this.models.router()
           throw error
@@ -3633,7 +3671,7 @@ export class ChimeraBrowserRuntime {
       throw Object.assign(new Error('AGENT_MODEL_ROUTER_UNSUPPORTED'), { code: 'AGENT_MODEL_ROUTER_UNSUPPORTED' })
     }
     try {
-      return await preferredOrFallback(await this.models.routerFor(preference, scope))
+      return await preferredOrFallback(await this.models.routerFor(preference, scope, { decisionService }))
     } catch (error) {
       if (preference.mode !== 'preferred') throw error
       if (preferredFallbackAttempted) throw error
@@ -4095,12 +4133,14 @@ export class ChimeraBrowserRuntime {
       }, this.human)
       this.taskControllers.get(taskId).grantId = taskGrant.payload.grantId
       const taskRequirements = taskRecord.context?.requirements
+      const ceoJev = this.#jevForAgent({ grant: taskGrant, identity: this.agent, agentId: this.agentId })
       const ceoProvider = await this.#routerForAgent(this.agentId, {
         taskId,
         capturedSelection: taskRecord.model,
         taskModelPreference: taskRequirements?.modelPreference,
         taskRequirements,
         taskStage: 'decompose',
+        decisionService: ceoJev,
       })
       const ceoRouter = createReliableModelRouter({
         provider: createGatewayModelRouter({
@@ -4173,6 +4213,7 @@ export class ChimeraBrowserRuntime {
         }
         const { identity, grant } = this.#securityForSpecialist(manifest, taskId,
           requestedPeer ? [] : specialistManifests.filter(entry => !projectSession || this.taskAccessLeases.activeFor(entry.agentId, taskId)).map(entry => entry.agentId))
+        const specialistJev = this.#jevForAgent({ grant, identity, agentId: manifest.agentId })
         if (this.teamTransport && !projectSession && manifest.source.type === 'hermes') {
           const remoteProfileId = manifest.source.profileId
           const remoteWorkspace = resolve(this.teamRemoteWorkspaceRoot, taskId)
@@ -4224,6 +4265,7 @@ export class ChimeraBrowserRuntime {
               taskModelPreference: effectiveRequirements?.modelPreference,
               taskRequirements: effectiveRequirements,
               taskStage: 'specialist',
+              decisionService: specialistJev,
             })
             let resourceClaims = null
             if (isInferenceOnlyRouter(specialistProvider) && typeof specialistProvider.resourceClaim === 'function') {
@@ -4319,8 +4361,22 @@ export class ChimeraBrowserRuntime {
               consumeBudget,
               availableTools: [...toolsForAccessProfile(executionProfileId)
                 .filter((tool) => typeof this.workerToolExecutors[tool] === 'function')
-                .filter((tool) => !(projectSession && tool === 'mcp__chimera_worker__code')), ...PEER_TOOLS],
+                .filter((tool) => !(projectSession && tool === 'mcp__chimera_worker__code')), ...PEER_TOOLS,
+                ...(specialistJev ? ['jev_decide'] : [])],
               executePeerTool: (name, args, proposal) => dispatcher.executePeerTool(message.messageId, name, args, proposal),
+              executeDecisionTool: specialistJev ? async (args, proposal) => {
+                assertAssignmentActive()
+                proposal.assertProposalCurrent()
+                try {
+                  const result = await specialistJev.decide({ ...args, taskId, use: 'worker-tool' })
+                  assertAssignmentActive()
+                  proposal.assertProposalCurrent()
+                  return { status: 'completed', result }
+                } catch (error) {
+                  if (['TASK_STEERED', 'TASK_INBOX_UPDATED'].includes(error?.code)) throw error
+                  return { status: 'failed', reason: typeof error?.code === 'string' ? error.code : 'JEV_UNAVAILABLE' }
+                }
+              } : null,
               getInbox: () => dispatcher.inbox(message.messageId),
               getAccountBrowserLeases: () => this.accountCompanion.leasesFor({ taskId, agentId: manifest.agentId, workerSessionId: worker.sessionId }),
               ...(projectWorkspace ? {
@@ -4407,6 +4463,10 @@ export class ChimeraBrowserRuntime {
         audit: this.audit,
         humanKeys,
         modelRouter: ceoRouter,
+        decisionService: ceoJev,
+        specialistRouteCandidates: specialistManifests
+          .filter(manifest => !projectSession || this.taskAccessLeases.activeFor(manifest.agentId, taskId))
+          .map(manifest => manifest.agentId),
         decisions: this.decisions,
         resolveSpecialist,
         dispatchTask: input => dispatcher.delegate(input),

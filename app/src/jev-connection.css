@@ -1,0 +1,13 @@
+.jev-connection { padding: 20px; min-width: 0; border: 1px solid var(--border, #dce4ee); border-radius: 14px; background: var(--surface, #fff); }
+.jev-connection header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.jev-connection h3 { margin: 5px 0 0; }
+.jev-connection p { max-width: 75ch; font-size: 13px; line-height: 1.55; }
+.jev-connection form { display: grid; gap: 7px; margin-top: 16px; }
+.jev-connection label { font-size: 13px; font-weight: 650; }
+.jev-key-row, .jev-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.jev-key-row input { flex: 1 1 280px; min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--border, #cbd5e1); border-radius: 8px; color: inherit; background: var(--surface, #fff); }
+.jev-connection button { min-height: 40px; padding: 8px 12px; border: 1px solid var(--border, #cbd5e1); border-radius: 8px; color: inherit; background: var(--surface, #f4f7fc); cursor: pointer; font-weight: 650; }
+.jev-connection button:disabled { opacity: .6; cursor: not-allowed; }
+.jev-actions { margin-top: 10px; }
+.jev-connection .jev-error { color: #943b3b; }
+.jev-connection .jev-success { color: #136c3e; }

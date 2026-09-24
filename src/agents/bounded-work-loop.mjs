@@ -16,6 +16,16 @@ const TOOL_CONTRACTS = Object.freeze({
   agent_reply: Object.freeze({ summary: 'final result to the stored parent sender; ends this assignment and signs one structured result automatically' }),
   agent_report_blocker: Object.freeze({ summary: 'concrete blocker for the stored parent sender; ends this assignment with a signed failed result' }),
   agent_inbox: Object.freeze({ description: 'read correlated peer results at this model boundary; no arguments' }),
+  jev_decide: Object.freeze({
+    description: 'Optional TypeSafe Jev typed decision. Returns Choice, Score, or yes/no answers with confidence; it does not write or execute. Only use when a bounded decision helps the task.',
+    state: 'required 1..8192 character task state; sent to TypeSafe',
+    questions: 'required object with 1..8 named questions; each has type and instructions',
+    example: { state: 'The user asks for a short explanation.', questions: { format: {
+      type: 'choice', instructions: 'Select the best response format.',
+      criteria: { explanation: 'A short explanation', checklist: 'A short checklist' },
+    } } },
+    types: { choice: 'criteria is an object mapping 2..8 IDs to descriptions', score: 'criteria is an array of 2..8 ordered labels', noul: 'yes/no; omit criteria' },
+  }),
   read: Object.freeze({ path: 'workspace-relative file under mounts/ or scratch/' }),
   glob: Object.freeze({
     pattern: 'workspace-relative glob; * and ? match within one segment, ** matches zero or more segments, flat literal braces such as scratch/repo/**/*.{ts,tsx} are supported',
@@ -116,6 +126,7 @@ export async function runBoundedAgentLoop({
   onCheckpoint = async () => {},
   consumeBudget = () => {},
   executePeerTool = null,
+  executeDecisionTool = null,
   getInbox = () => [],
   getAccountBrowserLeases = () => [],
 } = {}) {
@@ -211,10 +222,13 @@ export async function runBoundedAgentLoop({
     assertActive()
     if (proposalStale()) continue
     const isPeer = turn.toolCall.name.startsWith('agent_')
+    const isDecision = turn.toolCall.name === 'jev_decide'
     let outcome
     try {
       outcome = isPeer && executePeerTool
         ? await executePeerTool(turn.toolCall.name, turn.toolCall.arguments, { assertProposalCurrent })
+        : isDecision && executeDecisionTool
+          ? await executeDecisionTool(turn.toolCall.arguments, { assertProposalCurrent })
         : await worker.executeTool({
           name: turn.toolCall.name,
           arguments: turn.toolCall.arguments,
@@ -237,7 +251,7 @@ export async function runBoundedAgentLoop({
           },
         })
     } catch (failure) {
-      if (isPeer && ['TASK_STEERED', 'TASK_INBOX_UPDATED'].includes(failure?.code)) continue
+      if ((isPeer || isDecision) && ['TASK_STEERED', 'TASK_INBOX_UPDATED'].includes(failure?.code)) continue
       throw failure
     }
     const observation = safeObservation({ tool: turn.toolCall.name, ...outcome })

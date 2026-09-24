@@ -79,6 +79,8 @@ export class CeoWorkspace {
     audit,
     humanKeys,
     modelRouter,
+    decisionService = null,
+    specialistRouteCandidates = null,
     decisions,
     specialists = [],
     specialistCatalog = [],
@@ -117,6 +119,8 @@ export class CeoWorkspace {
     this.audit = audit
     this.humanKeys = new Map(humanKeys)
     this.modelRouter = validateModelRouter(modelRouter)
+    this.decisionService = decisionService
+    this.specialistRouteCandidates = specialistRouteCandidates
     this.decisions = decisions
     this.specialists = new Map(specialists.map((specialist) => [specialist.agentId, specialist]))
     this.specialistCatalog = new Map(specialistCatalog.map((manifest) => [manifest.agentId, structuredClone(manifest)]))
@@ -217,6 +221,45 @@ export class CeoWorkspace {
     if (requestedSpecialistAgentId
       && plan.tasks.some((task) => task.specialistAgentId !== requestedSpecialistAgentId)) {
       throw Object.assign(new Error('TARGET_SPECIALIST_MISMATCH'), { code: 'TARGET_SPECIALIST_MISMATCH' })
+    }
+    if (this.decisionService && !requestedSpecialistAgentId) {
+      const available = this.#availableSpecialists()
+      const candidates = this.specialistRouteCandidates === null ? available
+        : available.filter(agentId => this.specialistRouteCandidates.includes(agentId))
+      if (candidates.length > 1 && candidates.length <= 8) {
+        const criteria = Object.fromEntries(candidates.map((agentId, index) => {
+          const manifest = this.specialistCatalog.get(agentId)
+          return [`agent${index}`, `${agentId}; role: ${manifest?.role ?? 'specialist'}; capabilities: ${(manifest?.capabilities ?? []).join(', ')}`.slice(0, 512)]
+        }))
+        for (const task of plan.tasks) {
+          assertProposalCurrent()
+          // An exact request or declared resource can be tied to the planned
+          // specialist's grant, so only unbound assignments may be rerouted.
+          if (task.request || task.resources) continue
+          try {
+            const answer = await this.decisionService.choose({
+              state: JSON.stringify({ objective: task.objective.slice(0, 4000),
+                acceptanceCriteria: task.acceptanceCriteria.slice(0, 8).map(item => item.slice(0, 256)),
+                plannedSpecialist: task.specialistAgentId }),
+              criteria, taskId: envelope.payload.taskId, use: 'specialist-route',
+            })
+            const index = answer ? Number(answer.choice.slice(5)) : -1
+            if (answer && Number.isInteger(index) && answer.choice === `agent${index}` && candidates[index]) {
+              const previousAgentId = task.specialistAgentId
+              task.specialistAgentId = candidates[index]
+              this.audit.append({ kind: 'jev.specialist.selected', taskId: envelope.payload.taskId,
+                previousAgentId, agentId: task.specialistAgentId, confidence: answer.confidence,
+                at: new Date(this.now()).toISOString() })
+            }
+          } catch (error) {
+            this.audit.append({ kind: 'jev.decision.fallback', use: 'specialist-route',
+              taskId: envelope.payload.taskId,
+              reason: boundedString(error?.code, 128) ? error.code : 'JEV_UNAVAILABLE',
+              at: new Date(this.now()).toISOString() })
+          }
+          assertProposalCurrent()
+        }
+      }
     }
     await this.onPlan(structuredClone(plan), assertProposalCurrent)
     this.audit.append({

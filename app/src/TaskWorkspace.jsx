@@ -30,7 +30,9 @@ function renderRoute(routing) {
   if (Array.isArray(routing)) return routing.length ? <ul>{routing.map((row, index) => <li key={`${row.routeId ?? 'route'}-${index}`}>{row.routeId ?? row.model ?? 'Route'} · {statusLabel(row.status)}</li>)}</ul> : <p className="task-workspace-muted">No task-specific route candidates are recorded.</p>
   const selected = routing.selected
   return <div className="task-workspace-routing-copy">
-    {selected ? <p>Selected {label(selected.agentId, 'unknown agent')} · {label(selected.model ?? selected.routeId, 'unknown model')} · {label(selected.executor, 'unknown executor')}.</p> : <p>No eligible route was recorded for this task.</p>}
+    {selected ? <p>Selected {label(selected.agentId, 'unknown agent')} · {label(selected.model ?? selected.routeId, 'unknown model')} · {label(selected.executor, 'unknown executor')}.</p>
+      : routing.selectionPending === true ? <p>Jev selection was pending when this routing record was captured.</p>
+        : <p>No eligible route was recorded for this task.</p>}
     {selected?.reason ? <p>{selected.reason}</p> : null}
     {list(routing.reasons).length ? <ul>{routing.reasons.map(reason => <li key={reason}>{reason}</li>)}</ul> : null}
     {list(routing.candidates).some(row => row.status !== 'eligible') ? <details><summary>Rejected candidates</summary><ul>{routing.candidates.filter(row => row.status !== 'eligible').map((row, index) => <li key={`${row.routeId ?? row.model ?? 'candidate'}-${index}`}>{row.model ?? row.routeId ?? 'Unknown route'} · {statusLabel(row.status)}{list(row.reasons).length ? ` · ${row.reasons.join('; ')}` : ''}</li>)}</ul></details> : null}

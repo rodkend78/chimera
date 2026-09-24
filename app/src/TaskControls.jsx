@@ -348,7 +348,9 @@ export function TaskControls({ tasks = [], refresh, notify, selectedTaskId, onSe
     {task.routing ? <section className="task-routing-summary" aria-label="Task routing details">
       {task.routing.selected
         ? <p>Selected route: {task.routing.selected.agentId ?? 'unknown agent'} · {task.routing.selected.model ?? task.routing.selected.routeId ?? 'unknown model'} · {task.routing.selected.executor ?? 'unknown executor'}{task.routing.selected.reason ? ` · ${task.routing.selected.reason}` : ''}</p>
-        : <p role="status">No eligible model route was available for this task. {task.routing.reasons?.join('; ') ?? 'The routing evidence is unresolved.'}</p>}
+        : task.routing.selectionPending === true
+          ? <p role="status">Jev selection was pending when this routing record was captured. {task.routing.reasons?.join('; ')}</p>
+          : <p role="status">No eligible model route was available for this task. {task.routing.reasons?.join('; ') ?? 'The routing evidence is unresolved.'}</p>}
       {task.routing.candidates?.some(candidate => candidate.status !== 'eligible') ? <details><summary>Rejected routing candidates</summary><ul>{task.routing.candidates.filter(candidate => candidate.status !== 'eligible').map(candidate => <li key={`${candidate.routeId ?? candidate.model ?? 'candidate'}:${candidate.status ?? 'unknown'}`}><strong>{candidate.model ?? candidate.routeId ?? 'Unknown route'}</strong> · {candidate.status ?? 'unknown'}{candidate.details?.length ? ` · ${candidate.details.join('; ')}` : candidate.reasons?.length ? ` · ${candidate.reasons.join('; ')}` : ''}</li>)}</ul></details> : null}
     </section> : null}
     <p>{active ? 'Guidance is applied before the next model/tool boundary. Stop revokes task access; it cannot undo an in-flight action.' : 'Continue with an explicit next objective. Prior artifacts and checkpoints stay linked; uncertain effects are not blindly retried.'}</p>

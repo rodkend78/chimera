@@ -19,6 +19,7 @@ import { DecisionResponsesContext, DecisionResponse, DecisionResponseList, useDe
 import { OperatorRecovery } from './OperatorRecovery.jsx'
 import { AgentSetupWizard } from './AgentSetupWizard.jsx'
 import { ConnectionsWorkspace } from './ConnectionsWorkspace.jsx'
+import { JevConnection } from './JevConnection.jsx'
 import { ConversationComposer } from './ConversationComposer.jsx'
 import './agent-setup.css'
 import './conversation-composer.css'
@@ -717,6 +718,7 @@ function AgentsView({ settingsOnly = false, state, refresh, onNavigate, onOpenSe
           {/* The shared surface preserves the specialized subscription connected and approved route evidence. */}
           <RjAwsConnection connection={state.connectors?.rjAws} refresh={refresh} />
           <AntigravityConnection provider={providers.find(provider => provider.id === 'antigravity')} refresh={refresh} />
+          <JevConnection />
           {state.connectors?.github ? <article className="connection-row" key="github">
             <span className={`connection-dot ${state.connectors.github.connected ? 'ready' : ''}`} />
             <div><strong>GitHub</strong><span>{state.connectors.github.connected ? `${state.connectors.github.login} · OAuth keychain · ${state.connectors.github.repositories.length} approved ${state.connectors.github.repositories.length === 1 ? 'repository' : 'repositories'}` : state.connectors.github.status === 'not-configured' ? 'Repository allowlist not configured' : 'OAuth authorization needed'}</span>{state.connectors.github.repositories?.length ? <ul aria-label="Approved GitHub repositories">{state.connectors.github.repositories.map(repository => { const name = typeof repository === 'string' ? repository : repository?.fullName ?? repository?.name; return name ? <li key={name}>{name}</li> : null })}</ul> : null}</div>
