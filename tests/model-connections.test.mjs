@@ -136,8 +136,14 @@ test('signed-in Claude Code is available for RJ task routing and inference-only 
     audit: new MemoryAuditLog(), workingDirectory: '/tmp', codexStatus: { configured: false },
     claudeCode, bedrockModels: [], bedrockProfiles: [], mantleSigner: null, env: {},
   })
-  assert.equal(registry.state().providers.find(provider => provider.id === 'claude-code').configured, true)
-  assert.equal(registry.state().selected.providerId, 'chimera-auto')
+  const state = registry.state()
+  assert.equal(state.providers.find(provider => provider.id === 'claude-code').configured, true)
+  const catalogModels = state.providers.filter(provider => !['codex', 'antigravity'].includes(provider.id))
+    .flatMap(provider => provider.models)
+  assert.equal(state.catalog.total, catalogModels.length)
+  assert.equal(state.catalog.capabilityCounts.orchestration,
+    catalogModels.filter(model => model.capabilities.includes('orchestration')).length)
+  assert.equal(state.selected.providerId, 'chimera-auto')
   assert.equal(registry.describeSelection({ mode: 'pinned', providerId: 'claude-code', model: 'sonnet' }).eligible, true)
   assert.deepEqual(await (await registry.routerFor({ mode: 'pinned', providerId: 'claude-code', model: 'sonnet' }))
     .route('Summarize.', { stage: 'specialist' }), { summary: 'Claude summary.' })

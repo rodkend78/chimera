@@ -836,8 +836,12 @@ export class LocalModelFabricRegistry {
           : {}),
       })),
     }))
+    const claudeModels = claude?.models.map(model => ({ ...model,
+      availability: claude.configured ? 'authenticated' : 'access-required',
+      capabilities: ['conversation', 'orchestration', 'coding', 'reasoning', 'research', 'bulk'],
+      inputModalities: ['TEXT'], outputModalities: ['TEXT'] })) ?? []
     const capabilityCounts = {}
-    for (const model of [...bedrockModels, ...mantleModels, ...compatibleProviders.flatMap((provider) => provider.models)]) {
+    for (const model of [...bedrockModels, ...mantleModels, ...compatibleProviders.flatMap((provider) => provider.models), ...claudeModels]) {
       for (const capability of model.capabilities) {
         capabilityCounts[capability] = (capabilityCounts[capability] ?? 0) + 1
       }
@@ -847,16 +851,14 @@ export class LocalModelFabricRegistry {
       mode: this.selection?.providerId === 'chimera-auto' ? 'auto' : 'manual',
       selected: this.selection ? structuredClone(this.selection) : null,
       catalog: {
-        total: bedrockModels.length + mantleModels.length + compatibleProviders.reduce((total, provider) => total + provider.models.length, 0),
+        total: bedrockModels.length + mantleModels.length + compatibleProviders.reduce((total, provider) => total + provider.models.length, 0) + claudeModels.length,
         capabilityCounts,
       },
       providers: [
         ...(claude ? [{ id: 'claude-code', name: 'Claude Code', configured: claude.configured,
           authentication: claude.configured ? 'Claude Code account' : null,
           connectionStatus: claude.status, execution: 'inference-only',
-          models: claude.models.map(model => ({ ...model, availability: claude.configured ? 'authenticated' : 'access-required',
-            capabilities: ['conversation', 'orchestration', 'coding', 'reasoning', 'research', 'bulk'],
-            inputModalities: ['TEXT'], outputModalities: ['TEXT'] })) }] : []),
+          models: claudeModels }] : []),
         ...(antigravity ? [{
           id: 'antigravity', name: 'Antigravity', configured: antigravity.configured,
           authentication: 'Antigravity account', connectionStatus: antigravity.status,

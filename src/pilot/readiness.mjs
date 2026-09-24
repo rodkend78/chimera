@@ -89,6 +89,12 @@ export function evaluatePilotReadiness({
         : 'No .env file is present; process-injected credentials remain supported.',
       'Run: chmod 600 .env',
     ),
+    ...(modelAccess.openrouter?.settingsError ? [check(
+      'openrouter-settings',
+      false,
+      'OpenRouter settings cannot be read safely.',
+      'Repair or remove .chimera/openrouter/settings.json before starting Chimera. The directory must be private (0700), and the file must be a regular owner-only file (0600).',
+    )] : []),
     check(
       'model-provider',
       modelAccess.codex.available === true || modelAccess.claudeCode?.available === true || modelAccess.openrouter?.available === true,
@@ -164,20 +170,27 @@ export async function inspectPilotReadiness({
     inspectAwsIdentity({ region: routing.region }),
     createClaudeCodeConnection().refresh(),
   ])
-  let openrouterConfigured = false
   const openRouterFile = join(root, '.chimera/openrouter/settings.json')
-  try {
-    await stat(openRouterFile)
-    openrouterConfigured = (await OpenRouterSettings.open({ filePath: openRouterFile })).status().configured
-  } catch { /* Missing or invalid local key; Settings can repair it. */ }
+  const openrouter = await inspectOpenRouterSettings({ filePath: openRouterFile })
   return evaluatePilotReadiness({
     nodeVersion,
     host: env.CHIMERA_HOST ?? '127.0.0.1',
     chromiumAvailable: await inspectChromium(),
     filesystemBrokerAvailable: await inspectFilesystemBroker(),
     envFile: await inspectEnvFile(join(root, '.env')),
-    modelAccess: { codex, bedrock, claudeCode, openrouter: { available: true, configured: openrouterConfigured } },
+    modelAccess: { codex, bedrock, claudeCode, openrouter },
   })
+}
+
+export async function inspectOpenRouterSettings({ filePath }) {
+  try {
+    const settings = await OpenRouterSettings.open({ filePath })
+    return { available: true, configured: settings.status().configured }
+  } catch (error) {
+    return { available: true, configured: false,
+      settingsError: error?.code === 'OPENROUTER_SETTINGS_PERMISSIONS_INVALID'
+        ? 'permissions' : 'invalid' }
+  }
 }
 
 export async function inspectFilesystemBroker({ execFileImpl = execFile } = {}) {
