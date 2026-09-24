@@ -167,13 +167,14 @@ export function createOpenAiCompatibleModelRouter({
   model,
   baseUrl,
   apiKey,
+  apiKeyForCall = null,
   fetchImpl = globalThis.fetch,
   timeoutMs = 120_000,
   maxTokens = 2_000,
 }) {
   if (!boundedString(providerId, 64)
     || !boundedString(model, 256)
-    || !boundedString(apiKey, 16_384)
+    || (!boundedString(apiKey, 16_384) && typeof apiKeyForCall !== 'function')
     || typeof fetchImpl !== 'function'
     || !Number.isSafeInteger(timeoutMs)
     || timeoutMs < 1_000
@@ -196,6 +197,8 @@ export function createOpenAiCompatibleModelRouter({
     descriptor,
     async route(prompt, context = {}) {
       if (!withinUtf8Bytes(prompt, MAX_PROMPT_BYTES)) throw new TypeError('model prompt is invalid')
+      const currentKey = apiKeyForCall ? apiKeyForCall() : apiKey
+      if (!boundedString(currentKey, 16_384)) throw codedError('MODEL_PROVIDER_AUTH_REQUIRED')
       let contextJson
       try {
         contextJson = JSON.stringify(context)
@@ -216,7 +219,7 @@ export function createOpenAiCompatibleModelRouter({
       const response = await fetchImpl(endpoint, {
         method: 'POST',
         headers: {
-          authorization: `Bearer ${apiKey}`,
+          authorization: `Bearer ${currentKey}`,
           'content-type': 'application/json',
           'user-agent': 'Team-RSI-Chimera/0.0.1',
         },

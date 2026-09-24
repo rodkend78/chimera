@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { chromium } from 'playwright'
 import { detectCodexSubscription } from '../ceo/local-model-fabric.mjs'
+import { createClaudeCodeConnection } from '../ceo/claude-code-provider.mjs'
+import { OpenRouterSettings } from '../ceo/openrouter-settings.mjs'
 
 const MINIMUM_NODE_VERSION = [22, 19, 0]
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
@@ -47,8 +49,12 @@ export function evaluatePilotReadiness({
 
   const configuredProviders = [
     ...(modelAccess.codex.configured === true ? ['codex'] : []),
+    ...(modelAccess.claudeCode?.configured === true ? ['claude-code'] : []),
+    ...(modelAccess.openrouter?.configured === true ? ['openrouter'] : []),
     ...(modelAccess.bedrock.configured === true ? ['aws-bedrock'] : []),
   ]
+  const executionConfigured = modelAccess.codex.configured === true
+    || modelAccess.claudeCode?.configured === true || modelAccess.openrouter?.configured === true
 
   const supportedNode = versionAtLeast(nodeVersion, MINIMUM_NODE_VERSION)
   const localBind = LOOPBACK_HOSTS.has(host)
@@ -83,15 +89,25 @@ export function evaluatePilotReadiness({
         : 'No .env file is present; process-injected credentials remain supported.',
       'Run: chmod 600 .env',
     ),
+    ...(modelAccess.openrouter?.settingsError ? [check(
+      'openrouter-settings',
+      false,
+      'OpenRouter settings cannot be read safely.',
+      'Repair or remove .chimera/openrouter/settings.json before starting Chimera. The directory must be private (0700), and the file must be a regular owner-only file (0600).',
+    )] : []),
     check(
       'model-provider',
-      modelAccess.codex.available === true,
-      modelAccess.codex.configured === true
+      modelAccess.codex.available === true || modelAccess.claudeCode?.available === true || modelAccess.openrouter?.available === true,
+      executionConfigured
         ? `Configured model providers: ${configuredProviders.join(', ')}.`
         : modelAccess.codex.available === true
           ? 'Codex is installed. Connect ChatGPT from the Chimera workspace to enable CEO orchestration.'
-          : 'Codex is required for CEO orchestration; AWS Bedrock is an optional specialist lane.',
-      'Install the Codex CLI. Then connect ChatGPT from Chimera; configure AWS separately to enable Bedrock specialists.',
+          : modelAccess.claudeCode?.available === true
+            ? 'Claude Code is installed. Sign in locally, then check the connection in Settings.'
+            : modelAccess.openrouter?.available === true
+          ? 'Connect ChatGPT, Claude Code, or your OpenRouter key in Settings to enable model tasks.'
+          : 'A model provider is required for orchestration.',
+      'Install the Codex CLI, install Claude Code, or use Settings to add your own OpenRouter API key.',
     ),
   ]
 
@@ -149,18 +165,32 @@ export async function inspectPilotReadiness({
   nodeVersion = process.versions.node,
 } = {}) {
   const routing = JSON.parse(await readFile(join(root, 'config/model-routing.json'), 'utf8'))
-  const [codex, bedrock] = await Promise.all([
+  const [codex, bedrock, claudeCode] = await Promise.all([
     detectCodexSubscription(),
     inspectAwsIdentity({ region: routing.region }),
+    createClaudeCodeConnection().refresh(),
   ])
+  const openRouterFile = join(root, '.chimera/openrouter/settings.json')
+  const openrouter = await inspectOpenRouterSettings({ filePath: openRouterFile })
   return evaluatePilotReadiness({
     nodeVersion,
     host: env.CHIMERA_HOST ?? '127.0.0.1',
     chromiumAvailable: await inspectChromium(),
     filesystemBrokerAvailable: await inspectFilesystemBroker(),
     envFile: await inspectEnvFile(join(root, '.env')),
-    modelAccess: { codex, bedrock },
+    modelAccess: { codex, bedrock, claudeCode, openrouter },
   })
+}
+
+export async function inspectOpenRouterSettings({ filePath }) {
+  try {
+    const settings = await OpenRouterSettings.open({ filePath })
+    return { available: true, configured: settings.status().configured }
+  } catch (error) {
+    return { available: true, configured: false,
+      settingsError: error?.code === 'OPENROUTER_SETTINGS_PERMISSIONS_INVALID'
+        ? 'permissions' : 'invalid' }
+  }
 }
 
 export async function inspectFilesystemBroker({ execFileImpl = execFile } = {}) {

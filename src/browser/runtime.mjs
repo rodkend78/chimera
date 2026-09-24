@@ -45,6 +45,8 @@ import { AskService, createAskModelProvider } from '../ceo/ask-service.mjs'
 import { createGatewayModelRouter } from '../ceo/gateway-model-router.mjs'
 import { createJevDecisionService, createJevModelRouter } from '../ceo/jev-decision.mjs'
 import { JevSettings } from '../ceo/jev-settings.mjs'
+import { OpenRouterSettings } from '../ceo/openrouter-settings.mjs'
+import { createClaudeCodeConnection } from '../ceo/claude-code-provider.mjs'
 import { DurableModelCallLedger, createReliableModelRouter } from '../ceo/reliable-model-router.mjs'
 import { createTaskFailureFromError, createTrustedModelCallNotSentError, isTrustedModelCallNotSentError } from '../ceo/model-call-errors.mjs'
 import { RoutingEvidenceStore } from '../ceo/routing-evidence.mjs'
@@ -583,6 +585,9 @@ export class ChimeraBrowserRuntime {
     jevSettings = null,
     jevSettingsFile,
     jevFetch = globalThis.fetch,
+    openRouterSettings = null,
+    openRouterSettingsFile,
+    claudeCode = null,
     connectionMachineRef = process.env.CHIMERA_MACHINE_REF ?? null,
     connectionMachineRefFile,
     codexAuth,
@@ -617,6 +622,9 @@ export class ChimeraBrowserRuntime {
     this.jevSettings = jevSettings
     this.jevSettingsFile = jevSettingsFile ?? resolve(profileDir, '../../jev/key.json')
     this.jevFetch = jevFetch
+    this.openRouterSettings = openRouterSettings
+    this.openRouterSettingsFile = openRouterSettingsFile ?? resolve(profileDir, '../../openrouter/settings.json')
+    this.claudeCode = claudeCode ?? createClaudeCodeConnection()
     this.connectionMachineRef = connectionMachineRef
     this.cachedConnectionState = []
     this.identityStore = identityStore ?? null
@@ -718,6 +726,7 @@ export class ChimeraBrowserRuntime {
     const policy = JSON.parse(await readFile(POLICY_URL, 'utf8'))
     this.audit ??= await openRuntimeAudit({ filePath: this.auditFile })
     this.jevSettings ??= await JevSettings.open({ filePath: this.jevSettingsFile })
+    this.openRouterSettings ??= await OpenRouterSettings.open({ filePath: this.openRouterSettingsFile })
     this.jevProvider = createJevModelRouter({ apiKeyForCall: () => this.jevSettings.apiKey(), fetchImpl: this.jevFetch })
     this.routingEvidence ??= await RoutingEvidenceStore.open({
       filePath: this.routingEvidenceFile,
@@ -756,6 +765,15 @@ export class ChimeraBrowserRuntime {
       })
     }
     this.modelConfig = JSON.parse(await readFile(MODEL_ROUTING_URL, 'utf8'))
+    this.modelConfig.openAiCompatibleProviders = [
+      ...(this.modelConfig.openAiCompatibleProviders ?? []).filter(provider => provider.id !== 'openrouter'),
+      { id: 'openrouter', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1',
+        apiKeyEnv: 'CHIMERA_OPENROUTER_SETTINGS_KEY',
+        models: this.openRouterSettings.models().map(id => ({ id, name: id,
+          capabilities: ['conversation', 'orchestration', 'coding', 'reasoning', 'research', 'bulk'],
+          inputModalities: ['TEXT'], outputModalities: ['TEXT'] })) },
+    ]
+    if (!this.modelRegistry) await this.claudeCode.refresh()
     if (!this.codexAuth && !this.modelRegistry) this.codexAuth = new CodexAppServerAuth()
     let authState = null
     if (this.codexAuth) {
@@ -3484,6 +3502,37 @@ export class ChimeraBrowserRuntime {
     return status
   }
 
+  openRouterStatus() { return this.openRouterSettings.status() }
+
+  async saveOpenRouterSettings(input) {
+    const before = this.#connectionBinding('openrouter')
+    const status = await this.openRouterSettings.save(input)
+    this.modelConfig.openAiCompatibleProviders.find(provider => provider.id === 'openrouter').models =
+      status.models.map(id => ({ id, name: id, capabilities: ['conversation', 'orchestration', 'coding', 'reasoning', 'research', 'bulk'],
+        inputModalities: ['TEXT'], outputModalities: ['TEXT'] }))
+    this.models.setOpenAiCompatibleModels?.('openrouter', status.models)
+    await this.#invalidateConnectionBinding('openrouter', before)
+    this.audit.append({ kind: 'openrouter.settings.updated', configured: true, at: new Date(this.now()).toISOString() })
+    return status
+  }
+
+  async disconnectOpenRouter() {
+    const before = this.#connectionBinding('openrouter')
+    const status = await this.openRouterSettings.disconnect()
+    this.models.setOpenAiCompatibleModels?.('openrouter', status.models)
+    await this.#invalidateConnectionBinding('openrouter', before)
+    this.audit.append({ kind: 'openrouter.settings.updated', configured: false, at: new Date(this.now()).toISOString() })
+    return status
+  }
+
+  async refreshClaudeCode({ invalidateBinding = true } = {}) {
+    const before = invalidateBinding ? this.#connectionBinding('claude-code') : null
+    const state = await this.claudeCode.refresh()
+    this.models.refreshClaudeCode?.()
+    if (before) await this.#invalidateConnectionBinding('claude-code', before)
+    return state
+  }
+
   #jevForAgent({ grant, identity, agentId }) {
     if (!this.jevSettings.status().configured) return null
     return createJevDecisionService({
@@ -4064,7 +4113,7 @@ export class ChimeraBrowserRuntime {
           },
           onProgress: async progress => {
             assertActive()
-            if (!['codex', 'antigravity'].includes(progress?.providerId) || !['started', 'responding', 'completed'].includes(progress.phase)) return
+            if (!['codex', 'antigravity', 'claude-code'].includes(progress?.providerId) || !['started', 'responding', 'completed'].includes(progress.phase)) return
             this.audit.append({ kind: 'model.execution.progress', providerId: progress.providerId,
               taskId, agentId: ownerAgentId, phase: progress.phase, at: new Date(this.now()).toISOString() })
           },
@@ -4777,6 +4826,13 @@ export class ChimeraBrowserRuntime {
         sessionStatus: typeof state.status === 'string' ? state.status : null,
       }
     }
+    if (providerId === 'claude-code') {
+      const state = this.claudeCode.state()
+      return { ...policy, accountRef: null, signedIn: state.configured, sessionStatus: state.status }
+    }
+    if (providerId === 'openrouter') {
+      return { ...policy, accountRef: null, signedIn: this.openRouterSettings.status().configured, sessionStatus: null }
+    }
     if (providerId === 'github') {
       const state = this.githubState()
       return {
@@ -4855,7 +4911,7 @@ export class ChimeraBrowserRuntime {
       const provider = this.models.state().providers?.find(entry => entry.id === providerId)
       const models = Array.isArray(provider?.models) ? provider.models.map(model => ({ id: model.id })) : []
       return {
-        signedIn: provider?.id === 'aws-bedrock-mantle' ? provider?.configured === true : false,
+        signedIn: ['aws-bedrock-mantle', 'openrouter'].includes(provider?.id) ? provider?.configured === true : false,
         catalogAvailable: models.length > 0,
         models,
         ...(models.length > 0 ? { executor: 'inference-only' } : {}),
@@ -4883,6 +4939,15 @@ export class ChimeraBrowserRuntime {
       disconnect: true,
     }
     const adapters = {
+      'claude-code': {
+        state: () => { const state = this.claudeCode.state(); return {
+          signedIn: state.configured, catalogAvailable: state.available,
+          sessionStatus: state.status, models: state.models.map(model => ({ id: model.id })),
+          executor: 'inference-only' } },
+        operations: { refresh: () => this.refreshClaudeCode({ invalidateBinding: false }),
+          'test-safe': () => this.refreshClaudeCode({ invalidateBinding: false }),
+          'test-model': pureModelTest },
+      },
       codex: {
         state: () => {
           const auth = this.codexAuthState()
@@ -5007,11 +5072,13 @@ export class ChimeraBrowserRuntime {
       adapters[provider.id] = {
         state: () => modelConnectionState(provider.id),
         operations: {
-          connect: localModelRefresh(provider.id),
+          ...(provider.id === 'openrouter' ? {} : { connect: localModelRefresh(provider.id) }),
           refresh: localModelRefresh(provider.id),
-          reconnect: localModelRefresh(provider.id),
+          ...(provider.id === 'openrouter' ? {} : { reconnect: localModelRefresh(provider.id) }),
           'test-model': pureModelTest,
-          disconnect: true,
+          // The specialized Settings action removes the saved key. A generic
+          // policy-only disconnect would leave it on disk and mislead users.
+          disconnect: provider.id === 'openrouter' ? undefined : true,
         },
       }
     }
@@ -5027,6 +5094,8 @@ export class ChimeraBrowserRuntime {
       return this.modelRegistryFactory({
         codexStatus: modelCodexStatus(authState),
         config: this.modelConfig,
+        claudeCode: this.claudeCode,
+        openAiCompatibleKeyResolvers: { openrouter: () => this.openRouterSettings.apiKey() },
         audit: this.audit,
         workingDirectory: WORKSPACE_ROOT,
         now: this.now,
@@ -5039,6 +5108,8 @@ export class ChimeraBrowserRuntime {
     return LocalModelFabricRegistry.open({
       config: this.modelConfig,
       antigravity: this.antigravity,
+      claudeCode: this.claudeCode,
+      openAiCompatibleKeyResolvers: { openrouter: () => this.openRouterSettings.apiKey() },
       audit: this.audit,
       workingDirectory: WORKSPACE_ROOT,
       ...(authState?.available === true ? { codexStatus: modelCodexStatus(authState) } : {}),

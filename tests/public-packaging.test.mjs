@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile as execFileCallback } from 'node:child_process'
-import { createPublicKey, generateKeyPairSync } from 'node:crypto'
+import { createPublicKey } from 'node:crypto'
 import { dirname, join, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import {
@@ -131,8 +131,11 @@ test('Gitleaks exception is exact key plus exact manifest path', { skip: !gitlea
   assert.equal(known.exitCode, 0)
   assert.equal(known.findings.length, 0)
 
-  const { publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
-  const differentKey = publicKey.export({ type: 'spki', format: 'der' }).toString('base64')
+  // Change one modulus byte so scanner expectations do not depend on random key material.
+  const differentDer = Buffer.from(manifest.key, 'base64')
+  differentDer[100] ^= 1
+  const differentKey = differentDer.toString('base64')
+  assert.equal(createPublicKey({ key: differentDer, format: 'der', type: 'spki' }).asymmetricKeyDetails?.modulusLength, 2048)
   assert.notEqual(differentKey, manifest.key)
   const different = await scan(
     await makeCase('different', 'extensions/account-browser/manifest.json', differentKey),

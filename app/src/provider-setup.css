@@ -1,0 +1,8 @@
+.provider-setup { display: grid; gap: 0.75rem; padding: 1.1rem; border: 1px solid var(--line, #d8dedc); border-radius: 14px; background: var(--surface, #fff); }
+.provider-setup header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.provider-setup h3 { margin: 0.15rem 0 0; }
+.provider-setup p { margin: 0; max-width: 75ch; }
+.provider-setup form { display: grid; gap: 0.5rem; max-width: 42rem; }
+.provider-setup input, .provider-setup textarea { width: 100%; min-width: 0; padding: 0.65rem; font: inherit; }
+.provider-setup-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+.provider-setup code { font-size: 0.9em; }

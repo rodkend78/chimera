@@ -1,10 +1,36 @@
 # Chimera Model Fabric
 
-**Status:** The local V1 pilot automatically routes work across an authenticated
-Codex subscription and verified AWS Bedrock inference profiles. Antigravity is an
+**Status:** The local V1 pilot can route work across an authenticated Codex
+subscription, a signed-in Claude Code CLI, a user-configured OpenRouter account,
+and verified AWS Bedrock inference profiles. Antigravity is an
 operator-managed native executor available by explicit model selection (see below).
 Chimera reuses the host's existing authentication; it never
 copies an OAuth token or AWS secret into the browser or repository.
+
+### Claude Code through the local CLI
+
+Install Claude Code 2.1.248 or newer and run `claude auth login` in a local
+terminal. In **Settings → Connections**, choose **Check Claude Code sign-in**.
+Chimera uses the local account for Sonnet, Opus, and Haiku. The route supports
+RJ planning, specialist work, and Ask; it calls Claude Code with a fresh
+private working directory, restricted and safe modes, no tools or MCP, no
+session persistence, bounded output, and schema-constrained JSON. Native
+Claude Code file and shell tools are not exposed through this connection.
+The sign-in check uses `claude auth status` without a model call. A model test
+may consume account quota. Task text is sent to the Claude Code service.
+
+### OpenRouter with your own key
+
+Get an API key from OpenRouter and enter it in **Settings → Connections →
+OpenRouter**. Enter model IDs one per line; `openrouter/free` is the initial
+choice, and other model IDs may use paid credits. The key is saved only on the
+local machine in `.chimera/openrouter/settings.json` with owner-only
+permissions, is never returned to the browser after saving, and is removed
+on disconnect. Chimera reads the key when a call starts, so a captured route
+cannot keep using a disconnected key for future calls. Already dispatched
+calls may finish. Task text is sent to OpenRouter when that route is used.
+Saving a key does not verify it or model access; use a deliberate model test
+in Connections if you want a quota-using check.
 
 ## Provider lanes
 
@@ -235,10 +261,10 @@ npm run pilot
 ```
 
 `pilot:check` verifies Node, loopback binding, Chromium, local `.env`
-permissions if a file exists, and that Codex is installed. A signed-out Codex
-installation passes so the operator can reach Chimera's in-app **Connect**
-flow; task submission remains disabled until login succeeds. AWS is an optional
-specialist lane. The check prints provider IDs only and never prints
+permissions if a file exists, and an available setup path for Codex, Claude
+Code, or a user-supplied OpenRouter key. OpenRouter can be set up from the UI
+after startup. Task submission still needs a configured route. AWS is an
+optional specialist lane. The check prints provider IDs only and never prints
 credentials.
 
 ## Remaining provider work

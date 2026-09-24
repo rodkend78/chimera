@@ -3,7 +3,7 @@ import { sha256 } from '../canonical.mjs'
 
 const OPERATION_SET = new Set(CONNECTION_OPERATIONS)
 const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
-const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$/
+const MODEL_ID = /^~?[A-Za-z0-9][A-Za-z0-9._~:/@+-]{0,511}$/
 const UNKNOWN_CODES = new Set([
   'CONNECTION_RESPONSE_LOST',
   'RESPONSE_LOST_AFTER_COMMIT',

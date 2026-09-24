@@ -19,7 +19,7 @@ function safeReceipt(error) {
   const safe = { requestId: receipt.requestId }
   if (typeof receipt.providerId === 'string' && IDENTIFIER.test(receipt.providerId)) safe.providerId = receipt.providerId
   if (typeof receipt.operation === 'string' && ACTIONS.has(receipt.operation)) safe.operation = receipt.operation
-  if (typeof receipt.model === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$/.test(receipt.model)) safe.model = receipt.model
+  if (typeof receipt.model === 'string' && /^~?[A-Za-z0-9][A-Za-z0-9._~:/@+-]{0,511}$/.test(receipt.model)) safe.model = receipt.model
   if (['pending', 'succeeded', 'failed', 'unknown'].includes(receipt.status)) safe.status = receipt.status
   return safe
 }

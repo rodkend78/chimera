@@ -20,6 +20,8 @@ import { OperatorRecovery } from './OperatorRecovery.jsx'
 import { AgentSetupWizard } from './AgentSetupWizard.jsx'
 import { ConnectionsWorkspace } from './ConnectionsWorkspace.jsx'
 import { JevConnection } from './JevConnection.jsx'
+import { OpenRouterConnection } from './OpenRouterConnection.jsx'
+import { ClaudeCodeConnection } from './ClaudeCodeConnection.jsx'
 import { ConversationComposer } from './ConversationComposer.jsx'
 import './agent-setup.css'
 import './conversation-composer.css'
@@ -718,6 +720,8 @@ function AgentsView({ settingsOnly = false, state, refresh, onNavigate, onOpenSe
           {/* The shared surface preserves the specialized subscription connected and approved route evidence. */}
           <RjAwsConnection connection={state.connectors?.rjAws} refresh={refresh} />
           <AntigravityConnection provider={providers.find(provider => provider.id === 'antigravity')} refresh={refresh} />
+          <ClaudeCodeConnection provider={providers.find(provider => provider.id === 'claude-code')} refresh={refresh} />
+          <OpenRouterConnection refresh={refresh} />
           <JevConnection />
           {state.connectors?.github ? <article className="connection-row" key="github">
             <span className={`connection-dot ${state.connectors.github.connected ? 'ready' : ''}`} />
