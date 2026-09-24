@@ -5076,7 +5076,9 @@ export class ChimeraBrowserRuntime {
           refresh: localModelRefresh(provider.id),
           ...(provider.id === 'openrouter' ? {} : { reconnect: localModelRefresh(provider.id) }),
           'test-model': pureModelTest,
-          disconnect: provider.id === 'openrouter' ? () => this.disconnectOpenRouter() : true,
+          // The specialized Settings action removes the saved key. A generic
+          // policy-only disconnect would leave it on disk and mislead users.
+          disconnect: provider.id === 'openrouter' ? undefined : true,
         },
       }
     }
